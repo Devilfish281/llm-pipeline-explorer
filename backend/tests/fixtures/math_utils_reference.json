@@ -1,0 +1,191 @@
+{
+  "provenance": {
+    "source": "Standalone JavaScript scalar reference matching the supplied TypeScript implementation",
+    "production_imports_used": false,
+    "notes": "Expected values are fixed; ordinary pytest does not execute Node or TypeScript."
+  },
+  "mulberry32_cases": [
+    {
+      "name": "seed_42",
+      "seed": 42,
+      "normalized_initial_state": 42,
+      "outputs": [
+        0.6011037519201636, 0.44829055899754167, 0.8524657934904099,
+        0.6697340414393693, 0.17481389874592423, 0.5265925421845168,
+        0.2732279943302274, 0.6247446539346129
+      ],
+      "final_state": 1767624658,
+      "draw_count": 8
+    },
+    {
+      "name": "seed_zero",
+      "seed": 0,
+      "normalized_initial_state": 0,
+      "outputs": [
+        0.26642920868471265, 0.0003297457005828619, 0.2232720274478197,
+        0.1462021479383111, 0.46732782293111086, 0.5450490827206522,
+        0.6152513844426721, 0.6489853798411787
+      ],
+      "final_state": 1767624616,
+      "draw_count": 8
+    },
+    {
+      "name": "maximum_uint32",
+      "seed": 4294967295,
+      "normalized_initial_state": 4294967295,
+      "outputs": [
+        0.8964226141106337, 0.189478256739676, 0.7156526781618595,
+        0.9440599093213677, 0.8452364315744489, 0.5391399988438934,
+        0.6804977387655526, 0.4755720964167267
+      ],
+      "final_state": 1767624615,
+      "draw_count": 8
+    },
+    {
+      "name": "positive_wraparound",
+      "seed": 4294967338,
+      "normalized_initial_state": 42,
+      "outputs": [
+        0.6011037519201636, 0.44829055899754167, 0.8524657934904099,
+        0.6697340414393693, 0.17481389874592423, 0.5265925421845168,
+        0.2732279943302274, 0.6247446539346129
+      ],
+      "final_state": 1767624658,
+      "draw_count": 8
+    },
+    {
+      "name": "negative_wraparound",
+      "seed": -1,
+      "normalized_initial_state": 4294967295,
+      "outputs": [
+        0.8964226141106337, 0.189478256739676, 0.7156526781618595,
+        0.9440599093213677, 0.8452364315744489, 0.5391399988438934,
+        0.6804977387655526, 0.4755720964167267
+      ],
+      "final_state": 1767624615,
+      "draw_count": 8
+    }
+  ],
+  "rounding_cases": [
+    {
+      "name": "ordinary_six_decimals",
+      "value": 1.2345674,
+      "digits": 6,
+      "raw_expected": 1.234567,
+      "raw_zero_sign": null,
+      "public_expected": 1.234567
+    },
+    {
+      "name": "round_up_six_decimals",
+      "value": 1.2345678,
+      "digits": 6,
+      "raw_expected": 1.234568,
+      "raw_zero_sign": null,
+      "public_expected": 1.234568
+    },
+    {
+      "name": "positive_half_tie",
+      "value": 1.5,
+      "digits": 0,
+      "raw_expected": 2.0,
+      "raw_zero_sign": null,
+      "public_expected": 2.0
+    },
+    {
+      "name": "negative_half_tie",
+      "value": -1.5,
+      "digits": 0,
+      "raw_expected": -1.0,
+      "raw_zero_sign": null,
+      "public_expected": -1.0
+    },
+    {
+      "name": "negative_half_to_zero",
+      "value": -0.5,
+      "digits": 0,
+      "raw_expected": 0.0,
+      "raw_zero_sign": -1.0,
+      "public_expected": 0.0
+    },
+    {
+      "name": "positive_just_below_half",
+      "value": 0.49999999999999994,
+      "digits": 0,
+      "raw_expected": 0.0,
+      "raw_zero_sign": 1.0,
+      "public_expected": 0.0
+    },
+    {
+      "name": "positive_just_above_half",
+      "value": 0.5000000000000001,
+      "digits": 0,
+      "raw_expected": 1.0,
+      "raw_zero_sign": null,
+      "public_expected": 1.0
+    },
+    {
+      "name": "negative_just_inside_half",
+      "value": -0.49999999999999994,
+      "digits": 0,
+      "raw_expected": 0.0,
+      "raw_zero_sign": -1.0,
+      "public_expected": 0.0
+    },
+    {
+      "name": "negative_just_past_half",
+      "value": -0.5000000000000001,
+      "digits": 0,
+      "raw_expected": -1.0,
+      "raw_zero_sign": null,
+      "public_expected": -1.0
+    },
+    {
+      "name": "tiny_positive",
+      "value": 4e-7,
+      "digits": 6,
+      "raw_expected": 0.0,
+      "raw_zero_sign": 1.0,
+      "public_expected": 0.0
+    },
+    {
+      "name": "tiny_negative",
+      "value": -4e-7,
+      "digits": 6,
+      "raw_expected": 0.0,
+      "raw_zero_sign": -1.0,
+      "public_expected": 0.0
+    },
+    {
+      "name": "positive_zero",
+      "value": 0.0,
+      "digits": 6,
+      "raw_expected": 0.0,
+      "raw_zero_sign": 1.0,
+      "public_expected": 0.0
+    },
+    {
+      "name": "negative_zero",
+      "value": -0.0,
+      "digits": 6,
+      "raw_expected": 0.0,
+      "raw_zero_sign": -1.0,
+      "public_expected": 0.0
+    },
+    {
+      "name": "negative_six_decimal_half_tie",
+      "value": -1.2345675,
+      "digits": 6,
+      "raw_expected": -1.234567,
+      "raw_zero_sign": null,
+      "public_expected": -1.234567
+    },
+    {
+      "name": "positive_six_decimal_half_tie",
+      "value": 1.2345675,
+      "digits": 6,
+      "raw_expected": 1.234568,
+      "raw_zero_sign": null,
+      "public_expected": 1.234568
+    }
+  ]
+}

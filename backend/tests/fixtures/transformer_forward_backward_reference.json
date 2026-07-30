@@ -1,0 +1,496 @@
+{
+  "provenance": {
+    "source": "Independent scalar/NumPy reference transcription of the supplied TypeScript Transformer formulas.",
+    "production_module_imported": false,
+    "production_forward_or_backward_called": false,
+    "initialization": "Mulberry32 seed 42; canonical one-layer draw order from transformer_layout_initialization_reference.json.",
+    "notes": "Expected values were calculated outside how_llms_work.ml.transformer."
+  },
+  "tolerances": {
+    "activation": {
+      "rtol": 0.00002,
+      "atol": 0.000002
+    },
+    "probability": {
+      "rtol": 0.00002,
+      "atol": 0.0000002
+    },
+    "loss": {
+      "rtol": 0.000002,
+      "atol": 0.000002
+    },
+    "gradient": {
+      "rtol": 0.0005,
+      "atol": 0.000005
+    },
+    "finite_difference": {
+      "rtol": 0.03,
+      "atol": 0.0003
+    }
+  },
+  "architecture": {
+    "vocabulary_size": 392,
+    "context_length": 32,
+    "embedding_dimension": 32,
+    "attention_head_count": 2,
+    "head_dimension": 16,
+    "attention_scale": 0.25,
+    "feed_forward_dimension": 128,
+    "layer_normalization_epsilon": 0.00001,
+    "cross_entropy_epsilon": 1e-10,
+    "num_layers": 1,
+    "seed": 42,
+    "initializer_draw_count": 38400,
+    "initializer_final_state": 2037747242
+  },
+  "ordinary": {
+    "input_ids": [0, 1, 2, 3],
+    "target_ids": [1, 2, 3, 4],
+    "embedding": [
+      {
+        "index": [0, 0],
+        "value": -0.09793476015329361
+      },
+      {
+        "index": [2, 17],
+        "value": -0.005828145891427994
+      },
+      {
+        "index": [3, 31],
+        "value": -0.15208280086517334
+      }
+    ],
+    "layer_norm_1": {
+      "mean": [
+        {
+          "index": [0],
+          "value": -0.028722338378429413
+        },
+        {
+          "index": [3],
+          "value": -0.024910887703299522
+        }
+      ],
+      "variance": [
+        {
+          "index": [0],
+          "value": 0.040249455720186234
+        },
+        {
+          "index": [3],
+          "value": 0.03959785774350166
+        }
+      ],
+      "normalized": [
+        {
+          "index": [0, 0],
+          "value": -0.34494519233703613
+        },
+        {
+          "index": [2, 17],
+          "value": -0.05637429654598236
+        }
+      ]
+    },
+    "query": [
+      {
+        "index": [0, 0],
+        "value": -1.7822812795639038
+      },
+      {
+        "index": [3, 31],
+        "value": 1.8878272771835327
+      }
+    ],
+    "key": [
+      {
+        "index": [1, 16],
+        "value": 0.850162148475647
+      },
+      {
+        "index": [3, 31],
+        "value": -0.8914300799369812
+      }
+    ],
+    "value": [
+      {
+        "index": [0, 0],
+        "value": -1.5538113117218018
+      },
+      {
+        "index": [2, 20],
+        "value": -0.7173506021499634
+      }
+    ],
+    "attention": {
+      "head_0_scores": [
+        {
+          "index": [1, 0],
+          "value": -0.3564426600933075
+        },
+        {
+          "index": [3, 2],
+          "value": -0.35069718956947327
+        }
+      ],
+      "head_1_scores": [
+        {
+          "index": [1, 0],
+          "value": 0.4291374683380127
+        },
+        {
+          "index": [3, 2],
+          "value": -0.6746994256973267
+        }
+      ],
+      "head_0_probabilities": [
+        {
+          "index": [1, 0],
+          "value": 0.6063458919525146
+        },
+        {
+          "index": [3, 2],
+          "value": 0.1741109937429428
+        }
+      ],
+      "head_1_probabilities": [
+        {
+          "index": [1, 0],
+          "value": 0.7852094173431396
+        },
+        {
+          "index": [3, 2],
+          "value": 0.20008547604084015
+        }
+      ]
+    },
+    "attention_output": [
+      {
+        "index": [0, 0],
+        "value": 0.07591494917869568
+      },
+      {
+        "index": [3, 31],
+        "value": -0.5302396416664124
+      }
+    ],
+    "first_residual": [
+      {
+        "index": [0, 0],
+        "value": -0.02201981097459793
+      },
+      {
+        "index": [3, 31],
+        "value": -0.6823224425315857
+      }
+    ],
+    "layer_norm_2": [
+      {
+        "index": [0, 0],
+        "value": 0.15309345722198486
+      },
+      {
+        "index": [3, 31],
+        "value": -1.5438969135284424
+      }
+    ],
+    "feed_forward_pre_activation": [
+      {
+        "index": [0, 0],
+        "value": 0.45302000641822815
+      },
+      {
+        "index": [2, 127],
+        "value": -0.13051797449588776
+      }
+    ],
+    "feed_forward_activation": [
+      {
+        "index": [0, 0],
+        "value": 0.45302000641822815
+      },
+      {
+        "index": [2, 127],
+        "value": 0.0
+      }
+    ],
+    "feed_forward_output": [
+      {
+        "index": [0, 0],
+        "value": 0.5262243747711182
+      },
+      {
+        "index": [3, 31],
+        "value": -0.247008815407753
+      }
+    ],
+    "block_output": [
+      {
+        "index": [0, 0],
+        "value": 0.5042045712471008
+      },
+      {
+        "index": [3, 31],
+        "value": -0.9293312430381775
+      }
+    ],
+    "final_normalization": [
+      {
+        "index": [0, 0],
+        "value": 0.5604153871536255
+      },
+      {
+        "index": [3, 31],
+        "value": -1.4640573263168335
+      }
+    ],
+    "logits": [
+      {
+        "index": [0, 0],
+        "value": -0.1485099047422409
+      },
+      {
+        "index": [3, 391],
+        "value": -0.3733598291873932
+      }
+    ],
+    "probabilities": [
+      {
+        "index": [0, 1],
+        "value": 0.0019201150862500072
+      },
+      {
+        "index": [3, 4],
+        "value": 0.0017374668968841434
+      }
+    ],
+    "loss": 6.146535881230759,
+    "gradients": {
+      "head_w": [
+        {
+          "index": [0, 0],
+          "value": 0.00047291064402088523
+        },
+        {
+          "index": [31, 391],
+          "value": -0.00120742607396096
+        }
+      ],
+      "head_b": [
+        {
+          "index": [0],
+          "value": 0.002091284841299057
+        },
+        {
+          "index": [391],
+          "value": 0.0018420391716063023
+        }
+      ],
+      "ln_f_gamma": [
+        {
+          "index": [0],
+          "value": -0.00948905386030674
+        }
+      ],
+      "ln_f_beta": [
+        {
+          "index": [31],
+          "value": 0.034704938530921936
+        }
+      ],
+      "w_q": [
+        {
+          "index": [0, 0],
+          "value": -0.006659561302512884
+        },
+        {
+          "index": [31, 31],
+          "value": 0.002751133171841502
+        }
+      ],
+      "w_k": [
+        {
+          "index": [0, 0],
+          "value": -0.021749107167124748
+        },
+        {
+          "index": [31, 31],
+          "value": 0.036812569946050644
+        }
+      ],
+      "w_v": [
+        {
+          "index": [0, 0],
+          "value": 0.009346130304038525
+        },
+        {
+          "index": [31, 31],
+          "value": 0.013527682982385159
+        }
+      ],
+      "w_o": [
+        {
+          "index": [0, 0],
+          "value": 0.022556237876415253
+        },
+        {
+          "index": [31, 31],
+          "value": 0.0018895610701292753
+        }
+      ],
+      "ff1_w": [
+        {
+          "index": [0, 0],
+          "value": -0.0031213134061545134
+        },
+        {
+          "index": [31, 127],
+          "value": -0.03620293363928795
+        }
+      ],
+      "ff2_w": [
+        {
+          "index": [0, 0],
+          "value": -0.03016718290746212
+        },
+        {
+          "index": [127, 31],
+          "value": 0.005820494145154953
+        }
+      ],
+      "tok_emb": [
+        {
+          "index": [0, 0],
+          "value": -0.09657102078199387
+        },
+        {
+          "index": [3, 31],
+          "value": -0.05071669816970825
+        }
+      ],
+      "pos_emb": [
+        {
+          "index": [0, 0],
+          "value": -0.09657102078199387
+        },
+        {
+          "index": [3, 31],
+          "value": -0.05071669816970825
+        }
+      ],
+      "input_gradient": [
+        {
+          "index": [0, 0],
+          "value": -0.09657102078199387
+        },
+        {
+          "index": [3, 31],
+          "value": -0.05071669816970825
+        }
+      ],
+      "head_0_score_gradient": [
+        {
+          "index": [1, 0],
+          "value": 0.007994860410690308
+        },
+        {
+          "index": [3, 2],
+          "value": 0.020147990435361862
+        }
+      ],
+      "head_1_score_gradient": [
+        {
+          "index": [1, 0],
+          "value": -0.000013548950846598018
+        },
+        {
+          "index": [3, 2],
+          "value": 0.021257422864437103
+        }
+      ]
+    }
+  },
+  "repeated_token": {
+    "input_ids": [0, 1, 0, 1],
+    "target_ids": [1, 0, 1, 2],
+    "loss": 6.023914714492745,
+    "token_embedding_gradient": [
+      {
+        "index": [0, 0],
+        "value": -0.003225872293114662
+      },
+      {
+        "index": [0, 31],
+        "value": 0.7423685789108276
+      },
+      {
+        "index": [1, 0],
+        "value": 0.22866269946098328
+      }
+    ],
+    "position_embedding_gradient": [
+      {
+        "index": [0, 0],
+        "value": 0.020870458334684372
+      },
+      {
+        "index": [2, 0],
+        "value": -0.024096330627799034
+      }
+    ],
+    "input_gradient": [
+      {
+        "index": [0, 0],
+        "value": 0.020870458334684372
+      },
+      {
+        "index": [2, 0],
+        "value": -0.024096330627799034
+      }
+    ]
+  },
+  "shard": {
+    "sequences": [
+      {
+        "input_ids": [0, 1, 2, 3],
+        "target_ids": [1, 2, 3, 4]
+      },
+      {
+        "input_ids": [0, 1, 0, 1],
+        "target_ids": [1, 0, 1, 2]
+      }
+    ],
+    "loss": 12.170450595723505,
+    "processed_sequence_count": 2,
+    "gradients": {
+      "tok_emb": [
+        {
+          "index": [0, 0],
+          "value": -0.09979689121246338
+        },
+        {
+          "index": [0, 31],
+          "value": 0.8824499249458313
+        },
+        {
+          "index": [1, 0],
+          "value": 0.2507627606391907
+        }
+      ],
+      "head_w": [
+        {
+          "index": [0, 0],
+          "value": -0.11221189051866531
+        },
+        {
+          "index": [31, 391],
+          "value": -0.002763201715424657
+        }
+      ]
+    }
+  },
+  "empty_shard": {
+    "loss": 0.0,
+    "processed_sequence_count": 0
+  }
+}

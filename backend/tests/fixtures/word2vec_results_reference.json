@@ -1,0 +1,275 @@
+{
+  "query_words": [
+    "KING",
+    "cat",
+    "cat",
+    " ",
+    "unknown",
+    "cat dog",
+    " cat",
+    "dog ",
+    "   "
+  ],
+  "embedding_result": {
+    "embeddings": [
+      {
+        "word": "KING",
+        "vector": [2.0, 0.0]
+      },
+      {
+        "word": "cat",
+        "vector": [1.0, 0.0]
+      },
+      {
+        "word": "cat",
+        "vector": [1.0, 0.0]
+      },
+      {
+        "word": " ",
+        "vector": [0.5, 0.5]
+      }
+    ],
+    "neighbors": [
+      {
+        "word": "KING",
+        "nearest": [
+          {
+            "word": "man",
+            "score": 1.0
+          },
+          {
+            "word": "cat",
+            "score": 1.0
+          },
+          {
+            "word": "he",
+            "score": 1.0
+          },
+          {
+            "word": "his",
+            "score": 1.0
+          },
+          {
+            "word": "prince",
+            "score": 0.98
+          }
+        ]
+      },
+      {
+        "word": "cat",
+        "nearest": [
+          {
+            "word": "king",
+            "score": 1.0
+          },
+          {
+            "word": "man",
+            "score": 1.0
+          },
+          {
+            "word": "he",
+            "score": 1.0
+          },
+          {
+            "word": "his",
+            "score": 1.0
+          },
+          {
+            "word": "prince",
+            "score": 0.98
+          }
+        ]
+      },
+      {
+        "word": "cat",
+        "nearest": [
+          {
+            "word": "king",
+            "score": 1.0
+          },
+          {
+            "word": "man",
+            "score": 1.0
+          },
+          {
+            "word": "he",
+            "score": 1.0
+          },
+          {
+            "word": "his",
+            "score": 1.0
+          },
+          {
+            "word": "prince",
+            "score": 0.98
+          }
+        ]
+      },
+      {
+        "word": " ",
+        "nearest": [
+          {
+            "word": "royal",
+            "score": 1.0
+          },
+          {
+            "word": "kitten",
+            "score": 0.86
+          },
+          {
+            "word": "puppy",
+            "score": 0.86
+          },
+          {
+            "word": "prince",
+            "score": 0.83
+          },
+          {
+            "word": "boy",
+            "score": 0.83
+          }
+        ]
+      }
+    ],
+    "similarities": [
+      {
+        "a": "KING",
+        "b": "cat",
+        "score": 1.0
+      },
+      {
+        "a": "KING",
+        "b": "cat",
+        "score": 1.0
+      },
+      {
+        "a": "KING",
+        "b": " ",
+        "score": 0.71
+      },
+      {
+        "a": "cat",
+        "b": "cat",
+        "score": 1.0
+      },
+      {
+        "a": "cat",
+        "b": " ",
+        "score": 0.71
+      },
+      {
+        "a": "cat",
+        "b": " ",
+        "score": 0.71
+      }
+    ],
+    "analogies": [
+      {
+        "query": "king - man + woman",
+        "result": " ",
+        "score": 1.0
+      },
+      {
+        "query": "queen - woman + man",
+        "result": " ",
+        "score": 1.0
+      },
+      {
+        "query": "prince - boy + girl",
+        "result": " ",
+        "score": 1.0
+      },
+      {
+        "query": "kitten - cat + dog",
+        "result": "woman",
+        "score": 0.99
+      },
+      {
+        "query": "puppy - dog + cat",
+        "result": "king",
+        "score": 0.99
+      },
+      {
+        "query": "he - man + woman",
+        "result": "she",
+        "score": 1.0
+      },
+      {
+        "query": "his - man + woman",
+        "result": "girl",
+        "score": 1.0
+      }
+    ],
+    "warnings": [
+      "\"unknown\" is not a single BPE token — it splits into [u, n, k, n, o, w, n]",
+      "\"cat dog\" is not a single BPE token — it splits into [cat,  , dog]",
+      "\" cat\" is not a single BPE token — it splits into [ , cat]",
+      "\"dog \" is not a single BPE token — it splits into [dog,  ]",
+      "\"   \" is not a single BPE token — it splits into [ ,  ,  ]"
+    ]
+  },
+  "saved_embedding_model": {
+    "type": "word2vec-skipgram",
+    "dimensions": 2,
+    "vocab": [
+      " ",
+      "king",
+      "man",
+      "woman",
+      "queen",
+      "prince",
+      "boy",
+      "girl",
+      "kitten",
+      "cat",
+      "dog",
+      "puppy",
+      "he",
+      "his",
+      "royal",
+      "princess",
+      "she",
+      "her",
+      "wolf"
+    ],
+    "merges": [
+      {
+        "pair": ["c", "a"],
+        "merged": "ca"
+      },
+      {
+        "pair": ["ca", "t"],
+        "merged": "cat"
+      },
+      {
+        "pair": ["d", "o"],
+        "merged": "do"
+      },
+      {
+        "pair": ["do", "g"],
+        "merged": "dog"
+      }
+    ],
+    "embeddings": {
+      " ": [0.5, 0.5],
+      "king": [2.0, 0.0],
+      "man": [1.0, 0.0],
+      "woman": [0.0, 1.0],
+      "queen": [0.0, 2.0],
+      "prince": [2.0, 0.4],
+      "boy": [1.0, 0.2],
+      "girl": [0.2, 1.0],
+      "kitten": [0.8, 0.2],
+      "cat": [1.0, 0.0],
+      "dog": [0.0, 1.0],
+      "puppy": [0.2, 0.8],
+      "he": [1.1, 0.0],
+      "his": [1.2, 0.0],
+      "royal": [1.0, 1.0],
+      "princess": [0.4, 2.0],
+      "she": [0.1, 1.1],
+      "her": [0.2, 1.2],
+      "wolf": [-1.0, -1.0]
+    }
+  }
+}

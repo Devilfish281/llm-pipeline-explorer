@@ -1,0 +1,5083 @@
+# Chunk number: 30 of 37
+
+.")
+
+    if len(parameters.blocks) != parameters.layout.num_layers:
+        raise ValueError("parameters.blocks must match the canonical layout layer count.")
+
+    vocabulary_size = int(parameters.tok_emb.shape[0])
+
+    if vocabulary_size <= 0:
+        raise ValueError("The Transformer Vocabulary cannot be empty.")
+
+    _validate_float32_array(
+        parameters.tok_emb,
+        name="parameters.tok_emb",
+        shape=(
+            vocabulary_size,
+            TRANSFORMER_EMBEDDING_DIMENSION,
+        ),
+    )
+    _validate_float32_array(
+        parameters.pos_emb,
+        name="parameters.pos_emb",
+        shape=(
+            TRANSFORMER_CONTEXT_LENGTH,
+            TRANSFORMER_EMBEDDING_DIMENSION,
+        ),
+    )
+
+    for block_index, block in enumerate(parameters.blocks):
+        vector_shape = (TRANSFORMER_EMBEDDING_DIMENSION,)
+        matrix_shape = (
+            TRANSFORMER_EMBEDDING_DIMENSION,
+            TRANSFORMER_EMBEDDING_DIMENSION,
+        )
+
+        _validate_float32_array(
+            block.ln1_gamma,
+            name=f"parameters.blocks[{block_index}].ln1_gamma",
+            shape=vector_shape,
+        )
+        _validate_float32_array(
+            block.ln1_beta,
+            name=f"parameters.blocks[{block_index}].ln1_beta",
+            shape=vector_shape,
+        )
+        _validate_float32_array(
+            block.w_q,
+            name=f"parameters.blocks[{block_index}].w_q",
+            shape=matrix_shape,
+        )
+        _validate_float32_array(
+            block.b_q,
+            name=f"parameters.blocks[{block_index}].b_q",
+            shape=vector_shape,
+        )
+        _validate_float32_array(
+            block.w_k,
+            name=f"parameters.blocks[{block_index}].w_k",
+            shape=matrix_shape,
+        )
+        _validate_float32_array(
+            block.b_k,
+            name=f"parameters.blocks[{block_index}].b_k",
+            shape=vector_shape,
+        )
+        _validate_float32_array(
+            block.w_v,
+            name=f"parameters.blocks[{block_index}].w_v",
+            shape=matrix_shape,
+        )
+        _validate_float32_array(
+            block.b_v,
+            name=f"parameters.blocks[{block_index}].b_v",
+            shape=vector_shape,
+        )
+        _validate_float32_array(
+            block.w_o,
+            name=f"parameters.blocks[{block_index}].w_o",
+            shape=matrix_shape,
+        )
+        _validate_float32_array(
+            block.b_o,
+            name=f"parameters.blocks[{block_index}].b_o",
+            shape=vector_shape,
+        )
+        _validate_float32_array(
+            block.ln2_gamma,
+            name=f"parameters.blocks[{block_index}].ln2_gamma",
+            shape=vector_shape,
+        )
+        _validate_float32_array(
+            block.ln2_beta,
+            name=f"parameters.blocks[{block_index}].ln2_beta",
+            shape=vector_shape,
+        )
+        _validate_float32_array(
+            block.ff1_w,
+            name=f"parameters.blocks[{block_index}].ff1_w",
+            shape=(
+                TRANSFORMER_EMBEDDING_DIMENSION,
+                TRANSFORMER_FEED_FORWARD_DIMENSION,
+            ),
+        )
+        _validate_float32_array(
+            block.ff1_b,
+            name=f"parameters.blocks[{block_index}].ff1_b",
+            shape=(TRANSFORMER_FEED_FORWARD_DIMENSION,),
+        )
+        _validate_float32_array(
+            block.ff2_w,
+            name=f"parameters.blocks[{block_index}].ff2_w",
+            shape=(
+                TRANSFORMER_FEED_FORWARD_DIMENSION,
+                TRANSFORMER_EMBEDDING_DIMENSION,
+            ),
+        )
+        _validate_float32_array(
+            block.ff2_b,
+            name=f"parameters.blocks[{block_index}].ff2_b",
+            shape=vector_shape,
+        )
+
+    _validate_float32_array(
+        parameters.ln_f_gamma,
+        name="parameters.ln_f_gamma",
+        shape=(TRANSFORMER_EMBEDDING_DIMENSION,),
+    )
+    _validate_float32_array(
+        parameters.ln_f_beta,
+        name="parameters.ln_f_beta",
+        shape=(TRANSFORMER_EMBEDDING_DIMENSION,),
+    )
+    _validate_float32_array(
+        parameters.head_w,
+        name="parameters.head_w",
+        shape=(
+            TRANSFORMER_EMBEDDING_DIMENSION,
+            vocabulary_size,
+        ),
+    )
+    _validate_float32_array(
+        parameters.head_b,
+        name="parameters.head_b",
+        shape=(vocabulary_size,),
+    )
+
+    return vocabulary_size
+
+
+def _add_matrices(
+    left: _Float32Array,
+    right: _Float32Array,
+    *,
+    name: str,
+) -> _Float32Array:
+    """Add two exact-shape matrices through float64 scratch precision."""
+    if left.shape != right.shape:
+        raise ValueError(f"{name} operands must have identical shapes.")
+
+    candidate = left.astype(np.float64) + right.astype(np.float64)
+
+    return _materialize_float32(
+        candidate,
+        name=name,
+    )
+
+
+def _add_vector_bias(
+    matrix: _Float32Array,
+    bias: _Float32Array,
+    *,
+    name: str,
+) -> _Float32Array:
+    """Add one exact column vector bias to every matrix row."""
+    if matrix.ndim != 2:
+        raise ValueError(f"{name} matrix must have rank two.")
+
+    if bias.shape != (matrix.shape[1],):
+        raise ValueError(f"{name} bias must have shape ({matrix.shape[1]},).")
+
+    candidate = matrix.astype(np.float64) + bias.astype(np.float64)[np.newaxis, :]
+
+    return _materialize_float32(
+        candidate,
+        name=name,
+    )
+
+
+def _sum_rows(
+    matrix: _Float32Array,
+    *,
+    name: str,
+) -> _Float32Array:
+    """Sum matrix rows into one float32 parameter-gradient vector."""
+    candidate = np.sum(
+        matrix,
+        axis=0,
+        dtype=np.float64,
+    )
+
+    return _materialize_float32(
+        candidate,
+        name=name,
+    )
+
+
+def _copy_column_slice(
+    matrix: _Float32Array,
+    start: int,
+    stop: int,
+    *,
+    name: str,
+) -> _Float32Array:
+    """Return one independent C-contiguous feature-column slice."""
+    return _materialize_float32(
+        matrix[:, start:stop],
+        name=name,
+    )
+
+
+def _embedding_forward(
+    input_ids: tuple[int, ...],
+    parameters: TransformerParameterViews,
+) -> _Float32Array:
+    """Combine learned token and absolute positional embeddings."""
+    candidate = np.empty(
+        (
+            len(input_ids),
+            TRANSFORMER_EMBEDDING_DIMENSION,
+        ),
+        dtype=np.float64,
+        order="C",
+    )
+
+    for position, token_id in enumerate(input_ids):
+        candidate[position, :] = parameters.tok_emb[token_id, :].astype(
+            np.float64
+        ) + parameters.pos_emb[position, :].astype(np.float64)
+
+    return _materialize_float32(
+        candidate,
+        name="embedding activation",
+    )
+
+
+def _layer_normalization_forward(
+    source: _Float32Array,
+    gamma: _Float32Array,
+    beta: _Float32Array,
+    *,
+    name: str,
+) -> TransformerLayerNormalizationCache:
+    """Apply per-position population-variance Layer Normalization."""
+    sequence_length = source.shape[0]
+
+    _validate_float32_array(
+        source,
+        name=f"{name} source",
+        shape=(
+            sequence_length,
+            TRANSFORMER_EMBEDDING_DIMENSION,
+        ),
+    )
+    _validate_float32_array(
+        gamma,
+        name=f"{name} gamma",
+        shape=(TRANSFORMER_EMBEDDING_DIMENSION,),
+    )
+    _validate_float32_array(
+        beta,
+        name=f"{name} beta",
+        shape=(TRANSFORMER_EMBEDDING_DIMENSION,),
+    )
+
+    source_float64 = source.astype(np.float64)
+    means_float64 = np.mean(
+        source_float64,
+        axis=1,
+        dtype=np.float64,
+    )
+    centered_float64 = source_float64 - means_float64[:, np.newaxis]
+    variances_float64 = np.mean(
+        centered_float64 * centered_float64,
+        axis=1,
+        dtype=np.float64,
+    )
+    inverse_standard_deviations_float64 = 1.0 / np.sqrt(
+        variances_float64 + TRANSFORMER_LAYER_NORMALIZATION_EPSILON
+    )
+    normalized_float64 = centered_float64 * inverse_standard_deviations_float64[:, np.newaxis]
+    output_float64 = (
+        normalized_float64 * gamma.astype(np.float64)[np.newaxis, :]
+        + beta.astype(np.float64)[np.newaxis, :]
+    )
+
+    return TransformerLayerNormalizationCache(
+        means=_materialize_float32(
+            means_float64,
+            name=f"{name} means",
+        ),
+        variances=_materialize_float32(
+            variances_float64,
+            name=f"{name} variances",
+        ),
+        inverse_standard_deviations=_materialize_float32(
+            inverse_standard_deviations_float64,
+            name=f"{name} inverse standard deviations",
+        ),
+        normalized=_materialize_float32(
+            normalized_float64,
+            name=f"{name} normalized activation",
+        ),
+        output=_materialize_float32(
+            output_float64,
+            name=f"{name} output",
+        ),
+    )
+
+
+def _layer_normalization_backward(
+    output_gradient: _Float32Array,
+    cache: TransformerLayerNormalizationCache,
+    gamma: _Float32Array,
+    *,
+    name: str,
+) -> _LayerNormalizationBackwardResult:
+    """Apply the analytical per-position Layer Normalization reverse path."""
+    sequence_length = output_gradient.shape[0]
+    feature_count = TRANSFORMER_EMBEDDING_DIMENSION
+
+    _validate_float32_array(
+        output_gradient,
+        name=f"{name} output gradient",
+        shape=(sequence_length, feature_count),
+    )
+    _validate_float32_array(
+        cache.normalized,
+        name=f"{name} cached normalized activation",
+        shape=(sequence_length, feature_count),
+    )
+    _validate_float32_array(
+        cache.inverse_standard_deviations,
+        name=f"{name} cached inverse standard deviations",
+        shape=(sequence_length,),
+    )
+    _validate_float32_array(
+        gamma,
+        name=f"{name} gamma",
+        shape=(feature_count,),
+    )
+
+    output_gradient_float64 = output_gradient.astype(np.float64)
+    normalized_float64 = cache.normalized.astype(np.float64)
+    gamma_float64 = gamma.astype(np.float64)
+    inverse_standard_deviations_float64 = cache.inverse_standard_deviations.astype(np.float64)
+
+    normalized_gradient_float64 = output_gradient_float64 * gamma_float64[np.newaxis, :]
+    row_gradient_sums = np.sum(
+        normalized_gradient_float64,
+        axis=1,
+        dtype=np.float64,
+    )
+    row_gradient_normalized_sums = np.sum(
+        normalized_gradient_float64 * normalized_float64,
+        axis=1,
+        dtype=np.float64,
+    )
+
+    input_gradient_float64 = (
+        inverse_standard_deviations_float64[:, np.newaxis] / float(feature_count)
+    ) * (
+        float(feature_count) * normalized_gradient_float64
+        - row_gradient_sums[:, np.newaxis]
+        - normalized_float64 * row_gradient_normalized_sums[:, np.newaxis]
+    )
+
+    gamma_gradient_float64 = np.sum(
+        output_gradient_float64 * normalized_float64,
+        axis=0,
+        dtype=np.float64,
+    )
+    beta_gradient_float64 = np.sum(
+        output_gradient_float64,
+        axis=0,
+        dtype=np.float64,
+    )
+
+    return _LayerNormalizationBackwardResult(
+        input_gradient=_materialize_float32(
+            input_gradient_float64,
+            name=f"{name} input gradient",
+        ),
+        gamma_gradient=_materialize_float32(
+            gamma_gradient_float64,
+            name=f"{name} gamma gradient",
+        ),
+        beta_gradient=_materialize_float32(
+            beta_gradient_float64,
+            name=f"{name} beta gradient",
+        ),
+    )
+
+
+def _linear_forward(
+    source: _Float32Array,
+    weight: _Float32Array,
+    bias: _Float32Array,
+    *,
+    name: str,
+) -> _Float32Array:
+    """Apply one matrix projection followed by an exact vector bias."""
+    projected = matmul(
+        source,
+        weight,
+    )
+
+    return _add_vector_bias(
+        projected,
+        bias,
+        name=name,
+    )
+
+
+def _forward_transformer_block(
+    source: _Float32Array,
+    parameters: TransformerBlockParameterViews,
+    *,
+    block_index: int,
+) -> TransformerBlockForwardCache:
+    """Calculate one pre-normalized causal Transformer block."""
+    first_normalization = _layer_normalization_forward(
+        source,
+        parameters.ln1_gamma,
+        parameters.ln1_beta,
+        name=f"block {block_index} first normalization",
+    )
+
+    query = _linear_forward(
+        first_normalization.output,
+        parameters.w_q,
+        parameters.b_q,
+        name=f"block {block_index} query",
+    )
+    key = _linear_forward(
+        first_normalization.output,
+        parameters.w_k,
+        parameters.b_k,
+        name=f"block {block_index} key",
+    )
+    value = _linear_forward(
+        first_normalization.output,
+        parameters.w_v,
+        parameters.b_v,
+        name=f"block {block_index} value",
+    )
+
+    sequence_length = source.shape[0]
+    attention_heads: list[TransformerAttentionHeadCache] = []
+    weighted_heads: list[_Float32Array] = []
+
+    for head_index in range(TRANSFORMER_ATTENTION_HEAD_COUNT):
+        feature_start = head_index * TRANSFORMER_HEAD_DIMENSION
+        feature_stop = feature_start + TRANSFORMER_HEAD_DIMENSION
+
+        query_head = _copy_column_slice(
+            query,
+            feature_start,
+            feature_stop,
+            name=f"block {block_index} head {head_index} query",
+        )
+        key_head = _copy_column_slice(
+            key,
+            feature_start,
+            feature_stop,
+            name=f"block {block_index} head {head_index} key",
+        )
+        value_head = _copy_column_slice(
+            value,
+            feature_start,
+            feature_stop,
+            name=f"block {block_index} head {head_index} value",
+        )
+
+        scores = scalar_multiply(
+            matmul_transposed_right(
+                query_head,
+                key_head,
+            ),
+            TRANSFORMER_ATTENTION_SCALE,
+        )
+
+        future_mask = np.triu(
+            np.ones(
+                (
+                    sequence_length,
+                    sequence_length,
+                ),
+                dtype=np.bool_,
+            ),
+            k=1,
+        )
+        scores[future_mask] = -np.inf
+
+        _validate_float32_array(
+            scores,
+            name=f"block {block_index} head {head_index} scores",
+            shape=(sequence_length, sequence_length),
+            allow_negative_infinity=True,
+        )
+
+        probabilities = stable_row_softmax(scores)
+
+        if not np.array_equal(
+            probabilities[future_mask],
+            np.zeros(
+                int(np.count_nonzero(future_mask)),
+                dtype=np.float32,
+            ),
+        ):
+            raise FloatingPointError("Causal attention produced a nonzero future probability.")
+
+        weighted_values = matmul(
+            probabilities,
+            value_head,
+        )
+
+        attention_heads.append(
+            TransformerAttentionHeadCache(
+                scores=scores,
+                probabilities=probabilities,
+                weighted_values=weighted_values,
+            )
+        )
+        weighted_heads.append(weighted_values)
+
+    concatenated_attention = _materialize_float32(
+        np.concatenate(
+            weighted_heads,
+            axis=1,
+        ),
+        name=f"block {block_index} concatenated attention",
+    )
+    projected_attention = _linear_forward(
+        concatenated_attention,
+        parameters.w_o,
+        parameters.b_o,
+        name=f"block {block_index} projected attention",
+    )
+    first_residual = _add_matrices(
+        source,
+        projected_attention,
+        name=f"block {block_index} first residual",
+    )
+
+    second_normalization = _layer_normalization_forward(
+        first_residual,
+        parameters.ln2_gamma,
+        parameters.ln2_beta,
+        name=f"block {block_index} second normalization",
+    )
+    feed_forward_pre_activation = _linear_forward(
+        second_normalization.output,
+        parameters.ff1_w,
+        parameters.ff1_b,
+        name=f"block {block_index} feed-forward first projection",
+    )
+    feed_forward_activation = _materialize_float32(
+        np.maximum(
+            feed_forward_pre_activation,
+            np.float32(0.0),
+        ),
+        name=f"block {block_index} feed-forward ReLU",
+    )
+    feed_forward_output = _linear_forward(
+        feed_forward_activation,
+        parameters.ff2_w,
+        parameters.ff2_b,
+        name=f"block {block_index} feed-forward second projection",
+    )
+    output = _add_matrices(
+        first_residual,
+        feed_forward_output,
+        name=f"block {block_index} second residual",
+    )
+
+    return TransformerBlockForwardCache(
+        input_activation=_materialize_float32(
+            source,
+            name=f"block {block_index} cached input",
+        ),
+        first_normalization=first_normalization,
+        query=query,
+        key=key,
+        value=value,
+        attention_heads=tuple(attention_heads),
+        concatenated_attention=concatenated_attention,
+        projected_attention=projected_attention,
+        first_residual=first_residual,
+        second_normalization=second_normalization,
+        feed_forward_pre_activation=feed_forward_pre_activation,
+        feed_forward_activation=feed_forward_activation,
+        feed_forward_output=feed_forward_output,
+        output=output,
+    )
+
+
+def _validate_forward_result(
+    result: TransformerForwardResult,
+    *,
+    vocabulary_size: int,
+    expected_block_count: int,
+) -> None:
+    """Validate one completed public forward result before backward use."""
+    if type(result) is not TransformerForwardResult:
+        raise TypeError("forward must be a TransformerForwardResult.")
+
+    sequence_length = len(result.input_ids)
+
+    _validate_token_ids(
+        result.input_ids,
+        name="forward.input_ids",
+        vocabulary_size=vocabulary_size,
+    )
+    _validate_float32_array(
+        result.embedding_activation,
+        name="forward.embedding_activation",
+        shape=(
+            sequence_length,
+            TRANSFORMER_EMBEDDING_DIMENSION,
+        ),
+    )
+
+    if len(result.blocks) != expected_block_count:
+        raise ValueError("forward.blocks must match the parameter layer count.")
+
+    if not result.blocks:
+        raise ValueError("forward.blocks cannot be empty.")
+
+    for block_index, block in enumerate(result.blocks):
+        if len(block.attention_heads) != TRANSFORMER_ATTENTION_HEAD_COUNT:
+            raise ValueError(
+                f"forward.blocks[{block_index}] must contain exactly "
+                f"{TRANSFORMER_ATTENTION_HEAD_COUNT} attention heads."
+            )
+
+        for head_index, head in enumerate(block.attention_heads):
+            _validate_float32_array(
+                head.scores,
+                name=(f"forward.blocks[{block_index}]" f".attention_heads[{head_index}].scores"),
+                shape=(sequence_length, sequence_length),
+                allow_negative_infinity=True,
+            )
+            _validate_float32_array(
+                head.probabilities,
+                name=(
+                    f"forward.blocks[{block_index}]" f".attention_heads[{head_index}].probabilities"
+                ),
+                shape=(sequence_length, sequence_length),
+            )
+
+            future_mask = np.triu(
+                np.ones(
+                    (
+                        sequence_length,
+                        sequence_length,
+                    ),
+                    dtype=np.bool_,
+                ),
+                k=1,
+            )
+
+            if not np.isneginf(head.scores[future_mask]).all():
+                raise ValueError("Every future attention score must be negative infinity.")
+
+            if np.any(head.probabilities[future_mask] != np.float32(0.0)):
+                raise ValueError("Every future attention probability must be exactly zero.")
+
+    _validate_float32_array(
+        result.final_normalization.output,
+        name="forward.final_normalization.output",
+        shape=(
+            sequence_length,
+            TRANSFORMER_EMBEDDING_DIMENSION,
+        ),
+    )
+    _validate_float32_array(
+        result.logits,
+        name="forward.logits",
+        shape=(sequence_length, vocabulary_size),
+    )
+    _validate_float32_array(
+        result.probabilities,
+        name="forward.probabilities",
+        shape=(sequence_length, vocabulary_size),
+    )
+
+
+def calculate_transformer_forward(
+    input_ids: tuple[int, ...],
+    parameters: TransformerParameterViews,
+) -> TransformerForwardResult:
+    """Calculate one complete decoder-only Transformer forward pass."""
+    vocabulary_size = _validate_parameter_views(parameters)
+    validated_input_ids = _validate_token_ids(
+        input_ids,
+        name="input_ids",
+        vocabulary_size=vocabulary_size,
+    )
+
+    activation = _embedding_forward(
+        validated_input_ids,
+        parameters,
+    )
+    embedding_activation = activation
+    block_caches: list[TransformerBlockForwardCache] = []
+
+    for block_index, block_parameters in enumerate(parameters.blocks):
+        block_cache = _forward_transformer_block(
+            activation,
+            block_parameters,
+            block_index=block_index,
+        )
+        block_caches.append(block_cache)
+        activation = block_cache.output
+
+    final_normalization = _layer_normalization_forward(
+        activation,
+        parameters.ln_f_gamma,
+        parameters.ln_f_beta,
+        name="final normalization",
+    )
+    logits = _linear_forward(
+        final_normalization.output,
+        parameters.head_w,
+        parameters.head_b,
+        name="Vocabulary logits",
+    )
+    probabilities = stable_row_softmax(logits)
+
+    result = TransformerForwardResult(
+        input_ids=validated_input_ids,
+        embedding_activation=embedding_activation,
+        blocks=tuple(block_caches),
+        final_normalization=final_normalization,
+        logits=logits,
+        probabilities=probabilities,
+    )
+
+    _validate_forward_result(
+        result,
+        vocabulary_size=vocabulary_size,
+        expected_block_count=len(parameters.blocks),
+    )
+
+    return result
+
+
+def calculate_transformer_cross_entropy(
+    probabilities: _Float32Array,
+    target_ids: tuple[int, ...],
+) -> float:
+    """Calculate average next-token cross-entropy for one sequence."""
+    if type(probabilities) is not np.ndarray:
+        raise TypeError("probabilities must be a NumPy ndarray.")
+
+    if probabilities.dtype != np.dtype(np.float32):
+        raise TypeError("probabilities must have dtype float32.")
+
+    if probabilities.ndim != 2:
+        raise ValueError("probabilities must have rank two.")
+
+    sequence_length, vocabulary_size = probabilities.shape
+
+    if sequence_length <= 0 or vocabulary_size <= 0:
+        raise ValueError("probabilities cannot have an empty dimension.")
+
+    _validate_float32_array(
+        probabilities,
+        name="probabilities",
+        shape=(sequence_length, vocabulary_size),
+    )
+    validated_target_ids = _validate_token_ids(
+        target_ids,
+        name="target_ids",
+        vocabulary_size=vocabulary_size,
+        expected_length=sequence_length,
+    )
+
+    row_sums = np.sum(
+        probabilities,
+        axis=1,
+        dtype=np.float64,
+    )
+
+    if not np.allclose(
+        row_sums,
+        np.ones(sequence_length, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-6,
+    ):
+        raise FloatingPointError("Every probability row must sum to one.")
+
+    if np.any(probabilities < np.float32(0.0)):
+        raise FloatingPointError("Probabilities cannot contain negative values.")
+
+    accumulated_loss = 0.0
+
+    for position, target_id in enumerate(validated_target_ids):
+        target_probability = float(probabilities[position, target_id])
+        accumulated_loss += -math.log(target_probability + TRANSFORMER_CROSS_ENTROPY_EPSILON)
+
+    average_loss = accumulated_loss / float(sequence_length)
+
+    if not math.isfinite(average_loss):
+        raise FloatingPointError("Transformer cross-entropy loss is not finite.")
+
+    return average_loss
+
+
+def create_transformer_gradient_buffer(
+    layout: TransformerParameterLayout,
+) -> TransformerGradientBuffer:
+    """Allocate one fresh all-zero canonical Transformer gradient."""
+    if type(layout) is not TransformerParameterLayout:
+        raise TypeError("layout must be a TransformerParameterLayout.")
+
+    storage = np.zeros(
+        layout.total_float_count,
+        dtype=np.float32,
+        order="C",
+    )
+    views = build_transformer_parameter_views(
+        storage,
+        layout,
+    )
+
+    return TransformerGradientBuffer(
+        layout=layout,
+        storage=cast(_Float32Array, storage),
+        views=views,
+    )
+
+
+def _accumulate_array_in_place(
+    destination: _Float32Array,
+    contribution: _Float32Array,
+    *,
+    name: str,
+) -> None:
+    """Transactionally accumulate one same-shape float32 contribution."""
+    if destination.shape != contribution.shape:
+        raise ValueError(f"{name} destination and contribution shapes must match.")
+
+    if not destination.flags.writeable:
+        raise ValueError(f"{name} destination must be writable.")
+
+    candidate = _materialize_float32(
+        destination.astype(np.float64) + contribution.astype(np.float64),
+        name=f"{name} candidate",
+    )
+
+    destination[...] = candidate
+
+
+def _causal_softmax_backward(
+    probability_gradient: _Float32Array,
+    probabilities: _Float32Array,
+    *,
+    name: str,
+) -> _Float32Array:
+    """Reverse causal row softmax while retaining exact future zeros."""
+    if probability_gradient.shape != probabilities.shape:
+        raise ValueError(f"{name} gradient and probability shapes must match.")
+
+    sequence_length = probabilities.shape[0]
+    score_gradient = np.zeros(
+        probabilities.shape,
+        dtype=np.float32,
+        order="C",
+    )
+
+    for row_index in range(sequence_length):
+        probability_dot_gradient = 0.0
+
+        for column_index in range(row_index + 1):
+            probability_dot_gradient += float(probabilities[row_index, column_index]) * float(
+                probability_gradient[
+                    row_index,
+                    column_index,
+                ]
+            )
+
+        for column_index in range(row_index + 1):
+            score_gradient[row_index, column_index] = np.float32(
+                float(probabilities[row_index, column_index])
+                * (
+                    float(
+                        probability_gradient[
+                            row_index,
+                            column_index,
+                        ]
+                    )
+                    - probability_dot_gradient
+                )
+            )
+
+    if not np.isfinite(score_gradient).all():
+        raise FloatingPointError(f"{name} is not finite.")
+
+    future_mask = np.triu(
+        np.ones(
+            (
+                sequence_length,
+                sequence_length,
+            ),
+            dtype=np.bool_,
+        ),
+        k=1,
+    )
+
+    if np.any(score_gradient[future_mask] != np.float32(0.0)):
+        raise FloatingPointError(f"{name} contains a nonzero future gradient.")
+
+    return score_gradient
+
+
+def _backward_transformer_block(
+    output_gradient: _Float32Array,
+    cache: TransformerBlockForwardCache,
+    parameters: TransformerBlockParameterViews,
+    gradient: TransformerBlockParameterViews,
+    *,
+    block_index: int,
+) -> _BlockBackwardResult:
+    """Calculate and accumulate one complete Transformer block backward pass."""
+    feed_forward_output_gradient = _materialize_float32(
+        output_gradient,
+        name=f"block {block_index} feed-forward output gradient",
+    )
+
+    _accumulate_array_in_place(
+        gradient.ff2_w,
+        matmul_transposed_left(
+            cache.feed_forward_activation,
+            feed_forward_output_gradient,
+        ),
+        name=f"block {block_index} ff2_w gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.ff2_b,
+        _sum_rows(
+            feed_forward_output_gradient,
+            name=f"block {block_index} ff2_b contribution",
+        ),
+        name=f"block {block_index} ff2_b gradient",
+    )
+
+    feed_forward_activation_gradient = matmul_transposed_right(
+        feed_forward_output_gradient,
+        parameters.ff2_w,
+    )
+    feed_forward_pre_activation_gradient = _materialize_float32(
+        feed_forward_activation_gradient.astype(np.float64)
+        * (cache.feed_forward_pre_activation > np.float32(0.0)).astype(np.float64),
+        name=(f"block {block_index} feed-forward " "pre-activation gradient"),
+    )
+
+    _accumulate_array_in_place(
+        gradient.ff1_w,
+        matmul_transposed_left(
+            cache.second_normalization.output,
+            feed_forward_pre_activation_gradient,
+        ),
+        name=f"block {block_index} ff1_w gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.ff1_b,
+        _sum_rows(
+            feed_forward_pre_activation_gradient,
+            name=f"block {block_index} ff1_b contribution",
+        ),
+        name=f"block {block_index} ff1_b gradient",
+    )
+
+    second_normalization_output_gradient = matmul_transposed_right(
+        feed_forward_pre_activation_gradient,
+        parameters.ff1_w,
+    )
+    second_normalization_backward = _layer_normalization_backward(
+        second_normalization_output_gradient,
+        cache.second_normalization,
+        parameters.ln2_gamma,
+        name=f"block {block_index} second normalization",
+    )
+
+    _accumulate_array_in_place(
+        gradient.ln2_gamma,
+        second_normalization_backward.gamma_gradient,
+        name=f"block {block_index} ln2_gamma gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.ln2_beta,
+        second_normalization_backward.beta_gradient,
+        name=f"block {block_index} ln2_beta gradient",
+    )
+
+    first_residual_gradient = _add_matrices(
+        output_gradient,
+        second_normalization_backward.input_gradient,
+        name=f"block {block_index} first residual gradient",
+    )
+
+    _accumulate_array_in_place(
+        gradient.w_o,
+        matmul_transposed_left(
+            cache.concatenated_attention,
+            first_residual_gradient,
+        ),
+        name=f"block {block_index} w_o gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.b_o,
+        _sum_rows(
+            first_residual_gradient,
+            name=f"block {block_index} b_o contribution",
+        ),
+        name=f"block {block_index} b_o gradient",
+    )
+
+    concatenated_attention_gradient = matmul_transposed_right(
+        first_residual_gradient,
+        parameters.w_o,
+    )
+
+    query_gradient = np.zeros_like(
+        cache.query,
+        dtype=np.float32,
+        order="C",
+    )
+    key_gradient = np.zeros_like(
+        cache.key,
+        dtype=np.float32,
+        order="C",
+    )
+    value_gradient = np.zeros_like(
+        cache.value,
+        dtype=np.float32,
+        order="C",
+    )
+    attention_score_gradients: list[_Float32Array] = []
+
+    for head_index, head_cache in enumerate(cache.attention_heads):
+        feature_start = head_index * TRANSFORMER_HEAD_DIMENSION
+        feature_stop = feature_start + TRANSFORMER_HEAD_DIMENSION
+
+        query_head = _copy_column_slice(
+            cache.query,
+            feature_start,
+            feature_stop,
+            name=(f"block {block_index} head {head_index} " "cached query"),
+        )
+        key_head = _copy_column_slice(
+            cache.key,
+            feature_start,
+            feature_stop,
+            name=(f"block {block_index} head {head_index} " "cached key"),
+        )
+        value_head = _copy_column_slice(
+            cache.value,
+            feature_start,
+            feature_stop,
+            name=(f"block {block_index} head {head_index} " "cached value"),
+        )
+        weighted_value_gradient = _copy_column_slice(
+            concatenated_attention_gradient,
+            feature_start,
+            feature_stop,
+            name=(f"block {block_index} head {head_index} " "weighted-value gradient"),
+        )
+
+        probability_gradient = matmul_transposed_right(
+            weighted_value_gradient,
+            value_head,
+        )
+        head_value_gradient = matmul_transposed_left(
+            head_cache.probabilities,
+            weighted_value_gradient,
+        )
+        score_gradient = _causal_softmax_backward(
+            probability_gradient,
+            head_cache.probabilities,
+            name=(f"block {block_index} head {head_index} " "attention-score gradient"),
+        )
+        head_query_gradient = scalar_multiply(
+            matmul(
+                score_gradient,
+                key_head,
+            ),
+            TRANSFORMER_ATTENTION_SCALE,
+        )
+        head_key_gradient = scalar_multiply(
+            matmul_transposed_left(
+                score_gradient,
+                query_head,
+            ),
+            TRANSFORMER_ATTENTION_SCALE,
+        )
+
+        query_gradient[
+            :,
+            feature_start:feature_stop,
+        ] = head_query_gradient
+        key_gradient[
+            :,
+            feature_start:feature_stop,
+        ] = head_key_gradient
+        value_gradient[
+            :,
+            feature_start:feature_stop,
+        ] = head_value_gradient
+
+        attention_score_gradients.append(score_gradient)
+
+    _accumulate_array_in_place(
+        gradient.w_q,
+        matmul_transposed_left(
+            cache.first_normalization.output,
+            query_gradient,
+        ),
+        name=f"block {block_index} w_q gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.b_q,
+        _sum_rows(
+            query_gradient,
+            name=f"block {block_index} b_q contribution",
+        ),
+        name=f"block {block_index} b_q gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.w_k,
+        matmul_transposed_left(
+            cache.first_normalization.output,
+            key_gradient,
+        ),
+        name=f"block {block_index} w_k gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.b_k,
+        _sum_rows(
+            key_gradient,
+            name=f"block {block_index} b_k contribution",
+        ),
+        name=f"block {block_index} b_k gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.w_v,
+        matmul_transposed_left(
+            cache.first_normalization.output,
+            value_gradient,
+        ),
+        name=f"block {block_index} w_v gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.b_v,
+        _sum_rows(
+            value_gradient,
+            name=f"block {block_index} b_v contribution",
+        ),
+        name=f"block {block_index} b_v gradient",
+    )
+
+    first_normalization_output_gradient = _add_matrices(
+        _add_matrices(
+            matmul_transposed_right(
+                query_gradient,
+                parameters.w_q,
+            ),
+            matmul_transposed_right(
+                key_gradient,
+                parameters.w_k,
+            ),
+            name=(f"block {block_index} " "query-key input gradient"),
+        ),
+        matmul_transposed_right(
+            value_gradient,
+            parameters.w_v,
+        ),
+        name=(f"block {block_index} " "complete attention input gradient"),
+    )
+
+    first_normalization_backward = _layer_normalization_backward(
+        first_normalization_output_gradient,
+        cache.first_normalization,
+        parameters.ln1_gamma,
+        name=(f"block {block_index} " "first normalization"),
+    )
+
+    _accumulate_array_in_place(
+        gradient.ln1_gamma,
+        first_normalization_backward.gamma_gradient,
+        name=f"block {block_index} ln1_gamma gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.ln1_beta,
+        first_normalization_backward.beta_gradient,
+        name=f"block {block_index} ln1_beta gradient",
+    )
+
+    input_gradient = _add_matrices(
+        first_residual_gradient,
+        first_normalization_backward.input_gradient,
+        name=f"block {block_index} input gradient",
+    )
+
+    return _BlockBackwardResult(
+        input_gradient=input_gradient,
+        attention_score_gradients=tuple(attention_score_gradients),
+    )
+
+
+def calculate_transformer_backward(
+    forward: TransformerForwardResult,
+    target_ids: tuple[int, ...],
+    parameters: TransformerParameterViews,
+) -> TransformerBackwardResult:
+    """Calculate one complete analytical canonical Transformer gradient."""
+    vocabulary_size = _validate_parameter_views(parameters)
+    _validate_forward_result(
+        forward,
+        vocabulary_size=vocabulary_size,
+        expected_block_count=len(parameters.blocks),
+    )
+    validated_target_ids = _validate_token_ids(
+        target_ids,
+        name="target_ids",
+        vocabulary_size=vocabulary_size,
+        expected_length=len(forward.input_ids),
+    )
+
+    gradient = create_transformer_gradient_buffer(parameters.layout)
+    loss = calculate_transformer_cross_entropy(
+        forward.probabilities,
+        validated_target_ids,
+    )
+
+    sequence_length = len(validated_target_ids)
+    logit_gradient = _materialize_float32(
+        forward.probabilities,
+        name="initial logit gradient",
+    )
+
+    for position, target_id in enumerate(validated_target_ids):
+        logit_gradient[position, target_id] = np.float32(
+            float(logit_gradient[position, target_id]) - 1.0
+        )
+
+    logit_gradient = scalar_multiply(
+        logit_gradient,
+        1.0 / float(sequence_length),
+    )
+
+    _accumulate_array_in_place(
+        gradient.views.head_w,
+        matmul_transposed_left(
+            forward.final_normalization.output,
+            logit_gradient,
+        ),
+        name="head_w gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.views.head_b,
+        _sum_rows(
+            logit_gradient,
+            name="head_b contribution",
+        ),
+        name="head_b gradient",
+    )
+
+    final_normalization_output_gradient = matmul_transposed_right(
+        logit_gradient,
+        parameters.head_w,
+    )
+    final_normalization_backward = _layer_normalization_backward(
+        final_normalization_output_gradient,
+        forward.final_normalization,
+        parameters.ln_f_gamma,
+        name="final normalization",
+    )
+
+    _accumulate_array_in_place(
+        gradient.views.ln_f_gamma,
+        final_normalization_backward.gamma_gradient,
+        name="ln_f_gamma gradient",
+    )
+    _accumulate_array_in_place(
+        gradient.views.ln_f_beta,
+        final_normalization_backward.beta_gradient,
+        name="ln_f_beta gradient",
+    )
+
+    activation_gradient = final_normalization_backward.input_gradient
+    reverse_attention_score_gradients: list[tuple[_Float32Array, ...]] = []
+
+    for block_index in range(len(parameters.blocks) - 1, -1, -1):
+        block_backward = _backward_transformer_block(
+            activation_gradient,
+            forward.blocks[block_index],
+            parameters.blocks[block_index],
+            gradient.views.blocks[block_index],
+            block_index=block_index,
+        )
+        activation_gradient = block_backward.input_gradient
+        reverse_attention_score_gradients.append(block_backward.attention_score_gradients)
+
+    attention_score_gradients = tuple(reversed(reverse_attention_score_gradients))
+
+    for position, token_id in enumerate(forward.input_ids):
+        _accumulate_array_in_place(
+            gradient.views.tok_emb[token_id, :],
+            activation_gradient[position, :],
+            name=(f"token embedding gradient for token ID {token_id}"),
+        )
+        _accumulate_array_in_place(
+            gradient.views.pos_emb[position, :],
+            activation_gradient[position, :],
+            name=(f"position embedding gradient for position {position}"),
+        )
+
+    _validate_float32_array(
+        gradient.storage,
+        name="complete canonical gradient",
+        shape=(gradient.layout.total_float_count,),
+        require_writable=True,
+    )
+    _validate_float32_array(
+        activation_gradient,
+        name="complete input gradient",
+        shape=(
+            sequence_length,
+            TRANSFORMER_EMBEDDING_DIMENSION,
+        ),
+    )
+
+    for parameter_array in _parameter_arrays(parameters):
+        if np.shares_memory(
+            gradient.storage,
+            parameter_array,
+        ):
+            raise ValueError("Gradient storage must not overlap parameter storage.")
+
+    return TransformerBackwardResult(
+        loss=loss,
+        gradient=gradient,
+        logit_gradient=logit_gradient,
+        input_gradient=activation_gradient,
+        attention_score_gradients=attention_score_gradients,
+    )
+
+
+def calculate_transformer_sequence(
+    sequence: TransformerTrainingSequence,
+    parameters: TransformerParameterViews,
+) -> TransformerSequenceResult:
+    """Calculate one complete Training Sequence forward and backward pass."""
+    if type(sequence) is not TransformerTrainingSequence:
+        raise TypeError("sequence must be a TransformerTrainingSequence.")
+
+    if len(sequence.input_ids) != TRANSFORMER_SEQUENCE_LENGTH:
+        raise ValueError(
+            "A Transformer Training Sequence input must contain "
+            f"{TRANSFORMER_SEQUENCE_LENGTH} IDs."
+        )
+
+    if len(sequence.target_ids) != TRANSFORMER_SEQUENCE_LENGTH:
+        raise ValueError(
+            "A Transformer Training Sequence target must contain "
+            f"{TRANSFORMER_SEQUENCE_LENGTH} IDs."
+        )
+
+    forward = calculate_transformer_forward(
+        sequence.input_ids,
+        parameters,
+    )
+    backward = calculate_transformer_backward(
+        forward,
+        sequence.target_ids,
+        parameters,
+    )
+
+    return TransformerSequenceResult(
+        loss=backward.loss,
+        forward=forward,
+        backward=backward,
+    )
+
+
+def calculate_logical_training_shard(
+    sequences: tuple[TransformerTrainingSequence, ...],
+    shard: LogicalTrainingShard,
+    parameters: TransformerParameterViews,
+) -> LogicalTrainingShardResult:
+    """Calculate one fixed-order Logical Training Shard."""
+    if type(sequences) is not tuple:
+        raise TypeError("sequences must be an immutable tuple.")
+
+    if type(shard) is not LogicalTrainingShard:
+        raise TypeError("shard must be a LogicalTrainingShard.")
+
+    if shard.shard_index < 0 or shard.shard_index >= LOGICAL_TRAINING_SHARD_COUNT:
+        raise ValueError("shard.shard_index is outside the four-shard boundary.")
+
+    if (
+        shard.start_index < 0
+        or shard.stop_index < shard.start_index
+        or shard.stop_index > len(sequences)
+    ):
+        raise ValueError("The Logical Training Shard range is invalid.")
+
+    expected_shard = build_logical_training_shards(len(sequences))[shard.shard_index]
+
+    if shard != expected_shard:
+        raise ValueError("shard must match the canonical boundary for the supplied sequences.")
+
+    for sequence in sequences:
+        if type(sequence) is not TransformerTrainingSequence:
+            raise TypeError("Every sequences entry must be a TransformerTrainingSequence.")
+
+    _validate_parameter_views(parameters)
+
+    shard_gradient = create_transformer_gradient_buffer(parameters.layout)
+    accumulated_loss = 0.0
+    processed_sequence_count = 0
+
+    for sequence_index in range(shard.start_index, shard.stop_index):
+        sequence_result = calculate_transformer_sequence(
+            sequences[sequence_index],
+            parameters,
+        )
+
+        accumulated_loss += sequence_result.loss
+
+        if not math.isfinite(accumulated_loss):
+            raise FloatingPointError("Logical Training Shard loss is not finite.")
+
+        _accumulate_array_in_place(
+            shard_gradient.storage,
+            sequence_result.backward.gradient.storage,
+            name="Logical Training Shard canonical gradient",
+        )
+        processed_sequence_count += 1
+
+    _validate_float32_array(
+        shard_gradient.storage,
+        name="Logical Training Shard canonical gradient",
+        shape=(shard_gradient.layout.total_float_count,),
+        require_writable=True,
+    )
+
+    return LogicalTrainingShardResult(
+        shard=shard,
+        processed_sequence_count=processed_sequence_count,
+        loss=accumulated_loss,
+        gradient=shard_gradient,
+    )
+
+
+def _completion_cancelled(cancellation_event: Event) -> bool:
+    """Read one Event-compatible cooperative-cancellation signal."""
+    is_set = getattr(cancellation_event, "is_set", None)
+
+    if not callable(is_set):
+        raise TypeError("cancellation_event must provide an is_set() method.")
+
+    cancelled = is_set()
+
+    if type(cancelled) is not bool:
+        raise TypeError("cancellation_event.is_set() must return a bool.")
+
+    return cancelled
+
+
+def _raise_if_transformer_completion_cancelled(
+    cancellation_event: Event,
+) -> None:
+    """Prevent a cancelled completion operation from returning success."""
+    if _completion_cancelled(cancellation_event):
+        raise RuntimeError("Transformer completion was cancelled.")
+
+
+def _validate_transformer_completion_preprocessing(
+    preprocessing: TransformerPreprocessingSnapshot,
+) -> int:
+    """Validate immutable preprocessing shared by completion operations."""
+    if type(preprocessing) is not TransformerPreprocessingSnapshot:
+        raise TypeError("preprocessing must be a TransformerPreprocessingSnapshot.")
+
+    if type(preprocessing.vocabulary) is not tuple or not preprocessing.vocabulary:
+        raise ValueError("preprocessing.vocabulary must be a non-empty tuple.")
+
+    if any(type(token) is not str for token in preprocessing.vocabulary):
+        raise TypeError("Every preprocessing Vocabulary entry must be a string.")
+
+    if type(preprocessing.merges) is not tuple:
+        raise TypeError("preprocessing.merges must be an immutable tuple.")
+
+    for merge in preprocessing.merges:
+        if type(merge) is not Merge:
+            raise TypeError("Every preprocessing Merge Table entry must be a Merge.")
+
+        if type(merge.pair) is not tuple or len(merge.pair) != 2:
+            raise ValueError("Every preprocessing Merge pair must contain exactly two tokens.")
+
+        if any(type(token) is not str for token in merge.pair):
+            raise TypeError("Every preprocessing Merge pair entry must be a string.")
+
+        if type(merge.merged) is not str:
+            raise TypeError("Every preprocessing merged token must be a string.")
+
+    vocabulary_size = len(preprocessing.vocabulary)
+
+    _validate_token_ids(
+        preprocessing.generation_seed_ids,
+        name="preprocessing.generation_seed_ids",
+        vocabulary_size=vocabulary_size,
+        expected_length=TRANSFORMER_GENERATION_SEED_LENGTH,
+    )
+
+    if type(preprocessing.training_sequences) is not tuple:
+        raise TypeError("preprocessing.training_sequences must be an immutable tuple.")
+
+    for sequence in preprocessing.training_sequences:
+        if type(sequence) is not TransformerTrainingSequence:
+            raise TypeError(
+                "Every preprocessing.training_sequences entry must be a "
+                "TransformerTrainingSequence."
+            )
+
+    if type(preprocessing.logical_training_shards) is not tuple:
+        raise TypeError("preprocessing.logical_training_shards must be an immutable tuple.")
+
+    expected_shards = build_logical_training_shards(len(preprocessing.training_sequences))
+
+    if preprocessing.logical_training_shards != expected_shards:
+        raise ValueError("preprocessing logical shards do not match its Training Sequences.")
+
+    return vocabulary_size
+
+
+def _validate_transformer_completion_parameters(
+    parameters: InitializedTransformerParameters,
+    preprocessing: TransformerPreprocessingSnapshot,
+) -> int:
+    """Validate one finite canonical parameter owner against preprocessing."""
+    if type(parameters) is not InitializedTransformerParameters:
+        raise TypeError("parameters must be an InitializedTransformerParameters.")
+
+    vocabulary_size = _validate_transformer_completion_preprocessing(preprocessing)
+
+    _validate_transformer_parameter_layout(parameters.layout)
+
+    if parameters.layout.vocabulary_size != vocabulary_size:
+        raise ValueError("parameter layout Vocabulary size does not match preprocessing.")
+
+    storage = _validate_float32_array(
+        parameters.storage,
+        name="Transformer completion parameter storage",
+        shape=(parameters.layout.total_float_count,),
+    )
+
+    if parameters.views.layout != parameters.layout:
+        raise ValueError("parameter views do not match their canonical layout.")
+
+    parameter_vocabulary_size = _validate_parameter_views(parameters.views)
+
+    if parameter_vocabulary_size != vocabulary_size:
+        raise ValueError("parameter Vocabulary size does not match preprocessing.")
+
+    for parameter_view in _parameter_arrays(parameters.views):
+        if not np.shares_memory(parameter_view, storage):
+            raise ValueError("Every completion parameter view must use parameter storage.")
+
+    return vocabulary_size
+
+
+def _validate_completed_transformer_run(
+    run: TransformerTrainingRun,
+    preprocessing: TransformerPreprocessingSnapshot,
+) -> int:
+    """Validate the common successful-run boundary for final completion work."""
+    if type(run) is not TransformerTrainingRun:
+        raise TypeError("run must be a TransformerTrainingRun.")
+
+    if run.is_failed:
+        raise RuntimeError("A failed Transformer Training Run cannot be completed.")
+
+    if not run.is_complete:
+        raise RuntimeError("The Transformer Training Run must be complete.")
+
+    if run.last_completed_epoch != run.requested_epochs:
+        raise RuntimeError("The inclusive final Transformer epoch has not committed.")
+
+    _validate_transformer_training_run_storage(run)
+
+    vocabulary_size = _validate_transformer_completion_parameters(
+        run.parameters,
+        preprocessing,
+    )
+
+    if run.logical_training_shards != preprocessing.logical_training_shards:
+        raise ValueError("The run sequence ownership does not match preprocessing.")
+
+    return vocabulary_size
+
+
+def _validate_transformer_generation_arguments(
+    *,
+    epoch: int,
+    temperature: float,
+    top_p: float,
+    max_tokens: int,
+) -> tuple[int, float, float, int]:
+    """Validate exact public generation scalar types and ranges."""
+    if type(epoch) is not int:
+        raise TypeError("epoch must be an integer.")
+
+    if epoch < 0:
+        raise ValueError("epoch must be non-negative.")
+
+    if type(temperature) is not float:
+        raise TypeError("temperature must be a float.")
+
+    if not math.isfinite(temperature):
+        raise FloatingPointError("temperature must be finite.")
+
+    if not 0.1 <= temperature <= 2.0:
+        raise ValueError("temperature must be between 0.1 and 2.0.")
+
+    if type(top_p) is not float:
+        raise TypeError("top_p must be a float.")
+
+    if not math.isfinite(top_p):
+        raise FloatingPointError("top_p must be finite.")
+
+    if not 0.1 <= top_p <= 1.0:
+        raise ValueError("top_p must be between 0.1 and 1.0.")
+
+    if type(max_tokens) is not int:
+        raise TypeError("max_tokens must be an integer.")
+
+    if not 3 <= max_tokens <= 500:
+        raise ValueError("max_tokens must be between 3 and 500.")
+
+    return epoch, temperature, top_p, max_tokens
+
+
+def _sample_transformer_nucleus_token(
+    probabilities: _Float32Array,
+    *,
+    top_p: float,
+    generator: Mulberry32,
+) -> int:
+    """Sample one Vocabulary ID from the minimum stable top-p prefix."""
+    if type(probabilities) is not np.ndarray:
+        raise TypeError("probabilities must be a NumPy ndarray.")
+
+    if probabilities.dtype != np.dtype(np.float32):
+        raise TypeError("probabilities must have dtype float32.")
+
+    if probabilities.ndim != 1 or probabilities.size == 0:
+        raise ValueError("probabilities must be one non-empty row.")
+
+    if not probabilities.flags.c_contiguous:
+        raise ValueError("probabilities must be C-contiguous.")
+
+    if not np.isfinite(probabilities).all():
+        raise FloatingPointError("probabilities contain a non-finite value.")
+
+    if np.any(probabilities < np.float32(0.0)):
+        raise FloatingPointError("probabilities cannot contain negative values.")
+
+    ranked_indices = sorted(
+        range(int(probabilities.size)),
+        key=lambda token_id: (
+            -float(probabilities[token_id]),
+            token_id,
+        ),
+    )
+
+    nucleus: list[tuple[int, float]] = []
+    nucleus_probability = 0.0
+
+    for token_id in ranked_indices:
+        probability = float(probabilities[token_id])
+        nucleus.append((token_id, probability))
+        nucleus_probability += probability
+
+        if not math.isfinite(nucleus_probability):
+            raise FloatingPointError("top-p nucleus probability is not finite.")
+
+        if nucleus_probability >= top_p:
+            break
+
+    if not nucleus or nucleus_probability <= 0.0:
+        raise FloatingPointError("top-p nucleus has no positive probability.")
+
+    threshold = generator.random() * nucleus_probability
+    cumulative_probability = 0.0
+
+    for token_id, probability in nucleus:
+        cumulative_probability += probability
+
+        if threshold < cumulative_probability:
+            return token_id
+
+    return nucleus[-1][0]
+
+
+def generate_transformer_text(
+    parameters: InitializedTransformerParameters,
+    preprocessing: TransformerPreprocessingSnapshot,
+    *,
+    epoch: int,
+    temperature: float,
+    top_p: float,
+    max_tokens: int,
+    cancellation_event: Event,
+) -> GeneratedTextSample:
+    """Generate one deterministic epoch-seeded Transformer text sample."""
+    (
+        validated_epoch,
+        validated_temperature,
+        validated_top_p,
+        validated_max_tokens,
+    ) = _validate_transformer_generation_arguments(
+        epoch=epoch,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+
+    vocabulary_size = _validate_transformer_completion_parameters(
+        parameters,
+        preprocessing,
+    )
+
+    generated_ids = list(preprocessing.generation_seed_ids)
+    generator = Mulberry32((42 + validated_epoch) & 0xFFFFFFFF)
+
+    for _ in range(validated_max_tokens):
+        _raise_if_transformer_completion_cancelled(cancellation_event)
+
+        context_ids = tuple(generated_ids[-TRANSFORMER_SEQUENCE_LENGTH:])
+
+        forward = calculate_transformer_forward(
+            context_ids,
+            parameters.views,
+        )
+
+        final_logits = forward.logits[-1]
+
+        scaled_values = (
+            np.asarray(
+                final_logits,
+                dtype=np.float64,
+            )
+            / validated_temperature
+        )
+
+        if not np.isfinite(scaled_values).all():
+            raise FloatingPointError("temperature-scaled logits are not finite.")
+
+        scaled_row: _Float32Array = np.array(
+            scaled_values,
+            dtype=np.float32,
+            order="C",
+            copy=True,
+        ).reshape(
+            1,
+            vocabulary_size,
+        )
+
+        if not np.isfinite(scaled_row).all():
+            raise FloatingPointError("temperature-scaled float32 logits are not finite.")
+
+        probabilities: _Float32Array = stable_row_softmax(scaled_row)[0]
+
+        next_token_id = _sample_transformer_nucleus_token(
+            probabilities,
+            top_p=validated_top_p,
+            generator=generator,
+        )
+
+        generated_ids.append(next_token_id)
+
+    _raise_if_transformer_completion_cancelled(cancellation_event)
+
+    text = "".join(preprocessing.vocabulary[token_id] for token_id in generated_ids)
+
+    return GeneratedTextSample(
+        epoch=validated_epoch,
+        text=text,
+    )
+
+
+def evaluate_transformer_final_loss(
+    run: TransformerTrainingRun,
+    preprocessing: TransformerPreprocessingSnapshot,
+    *,
+    cancellation_event: Event,
+) -> float:
+    """Recompute exact fixed-order loss from final post-Adam parameters."""
+    _validate_completed_transformer_run(
+        run,
+        preprocessing,
+    )
+
+    if not preprocessing.training_sequences:
+        raise ValueError("Final evaluation requires at least one Training Sequence.")
+
+    accumulated_loss = 0.0
+
+    for sequence in preprocessing.training_sequences:
+        _raise_if_transformer_completion_cancelled(cancellation_event)
+
+        forward = calculate_transformer_forward(
+            sequence.input_ids,
+            run.parameters.views,
+        )
+
+        sequence_loss = calculate_transformer_cross_entropy(
+            forward.probabilities,
+            sequence.target_ids,
+        )
+
+        if not math.isfinite(sequence_loss):
+            raise FloatingPointError("Final Transformer sequence loss is not finite.")
+
+        accumulated_loss += sequence_loss
+
+        if not math.isfinite(accumulated_loss):
+            raise FloatingPointError("Accumulated final Transformer loss is not finite.")
+
+    average_loss = accumulated_loss / float(len(preprocessing.training_sequences))
+
+    if not math.isfinite(average_loss):
+        raise FloatingPointError("Final Transformer average loss is not finite.")
+
+    _raise_if_transformer_completion_cancelled(cancellation_event)
+
+    return round_typescript_decimal(
+        average_loss,
+        6,
+    )
+
+
+def _saved_transformer_parameter_values(
+    values: _Float32Array,
+    *,
+    record: TransformerParameterLayoutRecord,
+    name: str,
+) -> list[float]:
+    """Flatten, validate, and round one canonical durable parameter array."""
+    validated = _validate_float32_array(
+        values,
+        name=name,
+        shape=record.shape,
+    )
+
+    flat_values = validated.reshape(
+        -1,
+        order="C",
+    )
+
+    if int(flat_values.size) != record.length:
+        raise ValueError(f"{name} length does not match its canonical layout record.")
+
+    return [
+        round_typescript_decimal(
+            float(value),
+            6,
+        )
+        for value in flat_values
+    ]
+
+
+def _build_saved_transformer_block_weights(
+    block: TransformerBlockParameterViews,
+    *,
+    block_index: int,
+    layout: TransformerParameterLayout,
+) -> SavedTransformerBlockWeights:
+    """Build one exact canonical block dictionary in stable key order."""
+    saved_values: dict[str, list[float]] = {}
+
+    for key in _TRANSFORMER_BLOCK_PARAMETER_KEYS:
+        saved_values[key] = _saved_transformer_parameter_values(
+            block.get(key),
+            record=layout.get_record(
+                key,
+                block_index,
+            ),
+            name=f"blocks[{block_index}].{key}",
+        )
+
+    return cast(
+        SavedTransformerBlockWeights,
+        saved_values,
+    )
+
+
+def build_saved_transformer_model(
+    run: TransformerTrainingRun,
+    preprocessing: TransformerPreprocessingSnapshot,
+) -> SavedTransformerModel:
+    """Construct one fresh exact persistence-ready Saved Transformer Model."""
+    vocabulary_size = _validate_completed_transformer_run(
+        run,
+        preprocessing,
+    )
+
+    layout = run.parameters.layout
+    views = run.parameters.views
+
+    config: SavedTransformerConfig = {
+        "vocabSize": vocabulary_size,
+        "contextLen": TRANSFORMER_CONTEXT_LENGTH,
+        "embDim": TRANSFORMER_EMBEDDING_DIMENSION,
+        "numHeads": TRANSFORMER_ATTENTION_HEAD_COUNT,
+        "ffDim": TRANSFORMER_FEED_FORWARD_DIMENSION,
+        "numLayers": layout.num_layers,
+    }
+
+    saved_blocks: list[SavedTransformerBlockWeights] = [
+        _build_saved_transformer_block_weights(
+            block,
+            block_index=block_index,
+            layout=layout,
+        )
+        for block_index, block in enumerate(views.blocks)
+    ]
+
+    weights: SavedTransformerWeights = {
+        "tokEmb": _saved_transformer_parameter_values(
+            views.tok_emb,
+            record=layout.get_record("tokEmb"),
+            name="tokEmb",
+        ),
+        "posEmb": _saved_transformer_parameter_values(
+            views.pos_emb,
+            record=layout.get_record("posEmb"),
+            name="posEmb",
+        ),
+        "blocks": saved_blocks,
+        "lnFGamma": _saved_transformer_parameter_values(
+            views.ln_f_gamma,
+            record=layout.get_record("lnFGamma"),
+            name="lnFGamma",
+        ),
+        "lnFBeta": _saved_transformer_parameter_values(
+            views.ln_f_beta,
+            record=layout.get_record("lnFBeta"),
+            name="lnFBeta",
+        ),
+        "headW": _saved_transformer_parameter_values(
+            views.head_w,
+            record=layout.get_record("headW"),
+            name="headW",
+        ),
+        "headB": _saved_transformer_parameter_values(
+            views.head_b,
+            record=layout.get_record("headB"),
+            name="headB",
+        ),
+    }
+
+    merges: list[SavedTransformerMerge] = [
+        {
+            "pair": list(merge.pair),
+            "merged": merge.merged,
+        }
+        for merge in preprocessing.merges
+    ]
+
+    return {
+        "type": "decoder-transformer",
+        "config": config,
+        "vocab": list(preprocessing.vocabulary),
+        "merges": merges,
+        "weights": weights,
+    }```
+
+########################################
+Here is my code for backend/src/how_llms_work/ml/transformer_worker.py BELOW:
+########################################
+
+```python
+# src/how_llms_work/ml/transformer_worker.py
+"""Spawn-safe Transformer worker protocol and shared-memory execution boundary."""
+
+from __future__ import annotations
+
+import asyncio
+import gc
+import math
+import multiprocessing as mp
+import os
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from enum import StrEnum
+from multiprocessing.connection import Connection, _ConnectionBase
+from multiprocessing.connection import wait as wait_for_connections
+from multiprocessing.context import BaseContext, SpawnContext
+from multiprocessing.process import BaseProcess
+from multiprocessing.shared_memory import SharedMemory
+from threading import Event
+from time import monotonic
+from typing import Any, Final, NoReturn, Protocol, TypeAlias, cast
+
+import numpy as np
+import numpy.typing as npt
+from how_llms_work.ml.transformer import (
+    LOGICAL_TRAINING_SHARD_COUNT,
+    TRANSFORMER_MAX_LAYER_COUNT,
+    TRANSFORMER_MIN_LAYER_COUNT,
+    TRANSFORMER_SEQUENCE_LENGTH,
+    LogicalTrainingShard,
+    LogicalTrainingShardResult,
+    TransformerParameterLayout,
+    TransformerParameterViews,
+    TransformerTrainingSequence,
+    build_logical_training_shards,
+    build_transformer_parameter_layout,
+    build_transformer_parameter_views,
+    calculate_logical_training_shard,
+    create_transformer_gradient_buffer,
+)
+
+__all__ = [
+    "WORKER_PROTOCOL_VERSION",
+    "WorkerNumericDType",
+    "WorkerState",
+    "RequestScopedWorkerGroupState",
+    "RequestScopedWorkerGroupFailureCode",
+    "RequestScopedWorkerGroupCleanupFailureCode",
+    "RequestScopedWorkerGroupCleanupReport",
+    "RequestScopedWorkerGroupError",
+    "calculate_actual_worker_count",
+    "build_worker_shard_assignments",
+    "RequestScopedWorkerGroup",
+    "create_request_scoped_worker_group",
+    "WorkerFailurePhase",
+    "WorkerFailureCode",
+    "WorkerStartupConfig",
+    "ReadyMessage",
+    "ComputeMessage",
+    "ResultMessage",
+    "FailureMessage",
+    "StopMessage",
+    "StoppedMessage",
+    "WorkerProtocolValidationError",
+    "validate_worker_startup_config",
+    "validate_ready_message",
+    "validate_compute_message",
+    "validate_result_message",
+    "validate_failure_message",
+    "validate_stop_message",
+    "validate_stopped_message",
+    "run_transformer_worker",
+]
+
+WORKER_PROTOCOL_VERSION: Final = 1
+
+
+_Float32Array: TypeAlias = npt.NDArray[np.float32]
+_SequencePayload: TypeAlias = tuple[tuple[int, ...], tuple[int, ...]]
+_ShardPayload: TypeAlias = tuple[int, int, int]
+_WorkerShardAssignments: TypeAlias = tuple[tuple[int, ...], ...]
+
+type _WorkerConnection = _ConnectionBase[Any, Any]
+
+_WorkerWaitable: TypeAlias = _WorkerConnection | int
+_WorkerProcessTarget: TypeAlias = Callable[[Connection, int, object], None]
+_WorkerConnectionWaiter: TypeAlias = Callable[
+    [tuple[_WorkerWaitable, ...], float | None],
+    list[_WorkerWaitable],
+]
+_WorkerMonotonicClock: TypeAlias = Callable[[], float]
+_WorkerProcessFactory: TypeAlias = Callable[
+    [
+        BaseContext,
+        _WorkerProcessTarget,
+        _WorkerConnection,
+        int,
+        object,
+    ],
+    BaseProcess,
+]
+
+_WORKER_GROUP_STARTUP_TIMEOUT_SECONDS: Final = 30.0
+_WORKER_GROUP_EPOCH_TIMEOUT_SECONDS: Final = 300.0
+_WORKER_GROUP_POLL_TIMEOUT_SECONDS: Final = 0.1
+_WORKER_GROUP_INTERIM_SHUTDOWN_TIMEOUT_SECONDS: Final = 2.0
+
+
+class WorkerNumericDType(StrEnum):
+    """Closed shared-array dtype vocabulary for protocol version 1."""
+
+    FLOAT32 = "float32"
+
+
+class WorkerState(StrEnum):
+    """Closed worker lifecycle states."""
+
+    STARTING = "starting"
+    READY = "ready"
+    COMPUTING = "computing"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+
+
+class WorkerFailurePhase(StrEnum):
+    """Sanitized phase in which a controlled worker failure occurred."""
+
+    STARTUP = "startup"
+    COMMAND = "command"
+    COMPUTE = "compute"
+    SHUTDOWN = "shutdown"
+
+
+class WorkerFailureCode(StrEnum):
+    """Closed sanitized failure vocabulary for protocol version 1."""
+
+    INVALID_PROTOCOL = "invalid_protocol"
+    INVALID_LAYOUT = "invalid_layout"
+    SHARED_MEMORY = "shared_memory"
+    INVALID_OWNERSHIP = "invalid_ownership"
+    INVALID_STATE = "invalid_state"
+    NUMERICAL_FAILURE = "numerical_failure"
+    COMMUNICATION_FAILURE = "communication_failure"
+    CLEANUP_FAILURE = "cleanup_failure"
+    INTERNAL_FAILURE = "internal_failure"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerStartupConfig:
+    """Primitive-only startup data supplied to one spawned worker."""
+
+    protocol_version: int
+    worker_index: int
+    num_layers: int
+    dtype_marker: WorkerNumericDType
+    canonical_float_count: int
+    sequence_count: int
+    weight_shared_memory_name: str
+    assigned_shards: tuple[_ShardPayload, ...]
+    gradient_shared_memory_names: tuple[str, ...]
+    training_sequences: tuple[_SequencePayload, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReadyMessage:
+    """Worker startup commit marker sent after complete attachment validation."""
+
+    protocol_version: int
+    worker_index: int
+    assigned_shard_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeMessage:
+    """One exact, non-pipelined epoch command."""
+
+    protocol_version: int
+    worker_index: int
+    epoch: int
+    assigned_shard_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ResultMessage:
+    """Commit marker for completely published assigned-shard gradients."""
+
+    protocol_version: int
+    worker_index: int
+    epoch: int
+    assigned_shard_ids: tuple[int, ...]
+    shard_losses: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FailureMessage:
+    """Sanitized controlled-failure record with no internal exception data."""
+
+    protocol_version: int
+    worker_index: int
+    phase: WorkerFailurePhase
+    code: WorkerFailureCode
+    epoch: int | None
+    assigned_shard_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StopMessage:
+    """Cooperative stop command accepted only while the worker is ready."""
+
+    protocol_version: int
+    worker_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class StoppedMessage:
+    """Clean shutdown marker sent after attached resources are closed."""
+
+    protocol_version: int
+    worker_index: int
+
+
+class WorkerProtocolValidationError(ValueError):
+    """Stable protocol-boundary rejection without untrusted value disclosure."""
+
+    __slots__ = ("code",)
+
+    def __init__(
+        self,
+        code: WorkerFailureCode = WorkerFailureCode.INVALID_PROTOCOL,
+    ) -> None:
+        super().__init__("Worker protocol validation failed.")
+        self.code = code
+
+
+class RequestScopedWorkerGroupState(StrEnum):
+    """Closed parent-side lifecycle states for one request-owned worker group."""
+
+    ALLOCATED = "allocated"
+    STARTING = "starting"
+    READY = "ready"
+    COMPUTING = "computing"
+    STOPPING = "stopping"
+    CLOSED = "closed"
+    FAILED = "failed"
+
+
+class RequestScopedWorkerGroupFailureCode(StrEnum):
+    """Stable public failure categories for parent-side group operations."""
+
+    INVALID_INPUT = "invalid_input"
+    INVALID_STATE = "invalid_state"
+    STARTUP_FAILURE = "startup_failure"
+    EPOCH_FAILURE = "epoch_failure"
+    CANCELLED = "cancelled"
+    TIMEOUT = "timeout"
+    CLEANUP_FAILURE = "cleanup_failure"
+    INTERNAL_FAILURE = "internal_failure"
+
+
+class RequestScopedWorkerGroupCleanupFailureCode(StrEnum):
+    """Stable secondary cleanup categories without resource or exception details."""
+
+    CANCELLATION_SIGNAL = "cancellation_signal"
+    STOP_SEND = "stop_send"
+    COOPERATIVE_WAIT = "cooperative_wait"
+    TERMINATE = "terminate"
+    TERMINATE_WAIT = "terminate_wait"
+    KILL = "kill"
+    JOIN = "join"
+    EXIT_CODE = "exit_code"
+    PIPE_CLOSE = "pipe_close"
+    PROCESS_CLOSE = "process_close"
+    VIEW_RELEASE = "view_release"
+    SHARED_MEMORY_CLOSE = "shared_memory_close"
+    SHARED_MEMORY_UNLINK = "shared_memory_unlink"
+    INTERNAL = "internal"
+
+
+@dataclass(frozen=True, slots=True)
+class RequestScopedWorkerGroupCleanupReport:
+    """Immutable secondary cleanup outcome for one request-owned group."""
+
+    cooperative_shutdown_completed: bool
+    terminate_required: bool
+    kill_required: bool
+    process_exit_codes: tuple[int | None, ...]
+    secondary_failures: tuple[RequestScopedWorkerGroupCleanupFailureCode, ...]
+
+    @property
+    def successful(self) -> bool:
+        """Return whether cleanup completed without forced or secondary failure."""
+        return (
+            self.cooperative_shutdown_completed
+            and not self.terminate_required
+            and not self.kill_required
+            and not self.secondary_failures
+            and all(exit_code == 0 for exit_code in self.process_exit_codes)
+        )
+
+
+class RequestScopedWorkerGroupError(RuntimeError):
+    """Stable group failure boundary without internal exception or resource data."""
+
+    __slots__ = ("code", "cleanup_report")
+
+    def __init__(
+        self,
+        code: RequestScopedWorkerGroupFailureCode,
+        *,
+        cleanup_report: RequestScopedWorkerGroupCleanupReport | None = None,
+    ) -> None:
+        if type(code) is not RequestScopedWorkerGroupFailureCode:
+            raise TypeError("code must be a RequestScopedWorkerGroupFailureCode.")
+
+        if (
+            cleanup_report is not None
+            and type(cleanup_report) is not RequestScopedWorkerGroupCleanupReport
+        ):
+            raise TypeError(
+                "cleanup_report must be a RequestScopedWorkerGroupCleanupReport or None."
+            )
+
+        super().__init__("Request-scoped worker group operation failed.")
+        self.code = code
+        self.cleanup_report = cleanup_report
+
+
+_WorkerGroupPollObserver: TypeAlias = Callable[[], Awaitable[None]]
+
+
+class _SharedMemoryFactory(Protocol):
+    def __call__(
+        self,
+        name: str | None = None,
+        create: bool = False,
+        size: int = 0,
+    ) -> SharedMemory: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _RequestScopedSharedMemorySnapshot:
+    """Immutable allocation diagnostics without handles, views, or generated names."""
+
+    block_count: int
+    array_count: int
+    requested_byte_count: int
+    actual_byte_capacities: tuple[int, ...]
+    dtype_markers: tuple[WorkerNumericDType, ...]
+    shapes: tuple[tuple[int, ...], ...]
+    c_contiguous: tuple[bool, ...]
+    gradient_zeroed: tuple[bool, ...]
+    cancellation_requested: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _RequestScopedWorkerStartupSnapshot:
+    """Immutable startup diagnostics without process IDs or pipe handles."""
+
+    worker_count: int
+    started_worker_count: int
+    ready_worker_count: int
+    non_daemonic: tuple[bool, ...]
+    child_endpoints_closed: tuple[bool, ...]
+    alive: tuple[bool, ...]
+
+
+@dataclass(slots=True)
+class _ParentWorkerProcess:
+    """One parent-owned process, dedicated pipe, and startup state."""
+
+    worker_index: int
+    assigned_shard_ids: tuple[int, ...]
+    parent_connection: _WorkerConnection
+    child_connection: _WorkerConnection | None
+    process: BaseProcess
+    started: bool = False
+    ready: bool = False
+    observed_exit_code: int | None = None
+    non_daemonic: bool = True
+    process_closed: bool = False
+
+
+class _ParentSharedMemoryResources:
+    """Parent-owned numerical blocks and exact-range views for one request."""
+
+    __slots__ = (
+        "cancellation_signal",
+        "gradient_buffers",
+        "gradient_shared_memories",
+        "gradient_storages",
+        "layout",
+        "released",
+        "weight_buffer",
+        "weight_shared_memory",
+        "weight_storage",
+    )
+
+    def __init__(
+        self,
+        layout: TransformerParameterLayout,
+        cancellation_signal: Event,
+    ) -> None:
+        self.layout = layout
+        self.cancellation_signal = cancellation_signal
+        self.weight_shared_memory: SharedMemory | None = None
+        self.gradient_shared_memories: tuple[SharedMemory, ...] = ()
+        self.weight_buffer: memoryview | None = None
+        self.gradient_buffers: tuple[memoryview, ...] = ()
+        self.weight_storage: _Float32Array | None = None
+        self.gradient_storages: tuple[_Float32Array, ...] = ()
+        self.released = False
+
+    def allocation_snapshot(self) -> _RequestScopedSharedMemorySnapshot:
+        """Return immutable structural diagnostics for focused allocation tests."""
+        handles = self._ordered_handles()
+        storages = self._ordered_storages()
+
+        return _RequestScopedSharedMemorySnapshot(
+            block_count=len(handles),
+            array_count=len(storages),
+            requested_byte_count=self.layout.total_byte_count,
+            actual_byte_capacities=tuple(handle.size for handle in handles),
+            dtype_markers=tuple(
+                WorkerNumericDType.FLOAT32
+                for storage in storages
+                if storage.dtype == np.dtype(np.float32)
+            ),
+            shapes=tuple(storage.shape for storage in storages),
+            c_contiguous=tuple(storage.flags.c_contiguous for storage in storages),
+            gradient_zeroed=tuple(
+                bool(np.count_nonzero(storage) == 0) for storage in self.gradient_storages
+            ),
+            cancellation_requested=self.cancellation_signal.is_set(),
+        )
+
+    def copy_published_weights(self) -> _Float32Array:
+        """Return an independent copy of the current shared weight publication."""
+        storage = self.weight_storage
+
+        if storage is None:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_STATE)
+
+        copied = np.array(
+            storage,
+            dtype=np.float32,
+            order="C",
+            copy=True,
+        )
+        return copied
+
+    def release(self) -> tuple[RequestScopedWorkerGroupCleanupFailureCode, ...]:
+        """Release views, close all handles, and attempt every parent-owned unlink."""
+        if self.released:
+            return ()
+
+        self.released = True
+        secondary_failures: list[RequestScopedWorkerGroupCleanupFailureCode] = []
+        buffers = self._ordered_buffers()
+        handles = self._ordered_handles()
+
+        self.weight_storage = None
+        self.gradient_storages = ()
+
+        try:
+            gc.collect()
+        except Exception:
+            _append_cleanup_failure_once(
+                secondary_failures,
+                RequestScopedWorkerGroupCleanupFailureCode.VIEW_RELEASE,
+            )
+
+        self.weight_buffer = None
+        self.gradient_buffers = ()
+
+        for buffer in buffers:
+            try:
+                _release_parent_memoryview(buffer)
+            except Exception:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.VIEW_RELEASE,
+                )
+
+        for handle in handles:
+            try:
+                _close_parent_shared_memory(handle)
+            except Exception:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.SHARED_MEMORY_CLOSE,
+                )
+
+        for handle in handles:
+            try:
+                _unlink_parent_shared_memory(handle)
+            except Exception:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.SHARED_MEMORY_UNLINK,
+                )
+
+        self.weight_shared_memory = None
+        self.gradient_shared_memories = ()
+        return tuple(secondary_failures)
+
+    def _ordered_handles(self) -> tuple[SharedMemory, ...]:
+        weight_handle = self.weight_shared_memory
+
+        if weight_handle is None:
+            return self.gradient_shared_memories
+
+        return (weight_handle, *self.gradient_shared_memories)
+
+    def _ordered_buffers(self) -> tuple[memoryview, ...]:
+        weight_buffer = self.weight_buffer
+
+        if weight_buffer is None:
+            return self.gradient_buffers
+
+        return (weight_buffer, *self.gradient_buffers)
+
+    def _ordered_storages(self) -> tuple[_Float32Array, ...]:
+        weight_storage = self.weight_storage
+
+        if weight_storage is None:
+            return self.gradient_storages
+
+        return (weight_storage, *self.gradient_storages)
+
+
+class _RequestScopedWorkerGroupRuntime(Protocol):
+    async def start(
+        self,
+        *,
+        num_layers: int,
+        current_weights: _Float32Array,
+        training_sequences: tuple[TransformerTrainingSequence, ...],
+        logical_shards: tuple[LogicalTrainingShard, ...],
+        actual_worker_count: int,
+        assigned_shard_ids_by_worker: _WorkerShardAssignments,
+        poll_observer: _WorkerGroupPollObserver,
+    ) -> None: ...
+
+    async def compute_epoch(
+        self,
+        *,
+        epoch: int,
+        current_weights: _Float32Array,
+        poll_observer: _WorkerGroupPollObserver,
+    ) -> tuple[LogicalTrainingShardResult, ...]: ...
+
+    async def cleanup(self) -> RequestScopedWorkerGroupCleanupReport: ...
+
+
+class _SharedMemoryRequestScopedWorkerGroupRuntime:
+    """Step 5 runtime with bounded off-event-loop worker polling."""
+
+    __slots__ = (
+        "_actual_worker_count",
+        "_assigned_shard_ids_by_worker",
+        "_cancellation_signal",
+        "_cleanup_report",
+        "_connection_waiter",
+        "_context",
+        "_logical_shards",
+        "_monotonic_clock",
+        "_poll_observer",
+        "_process_factory",
+        "_resources",
+        "_shared_memory_factory",
+        "_started",
+        "_startup_timeout_seconds",
+        "_training_sequences",
+        "_worker_target",
+        "_workers",
+    )
+
+    def __init__(
+        self,
+        *,
+        shared_memory_factory: _SharedMemoryFactory = SharedMemory,
+        _process_context: BaseContext | None = None,
+        _worker_target: _WorkerProcessTarget | None = None,
+        _process_factory: _WorkerProcessFactory | None = None,
+        _connection_waiter: _WorkerConnectionWaiter | None = None,
+        _monotonic_clock: _WorkerMonotonicClock = monotonic,
+        _startup_timeout_seconds: float = _WORKER_GROUP_STARTUP_TIMEOUT_SECONDS,
+    ) -> None:
+        if (
+            type(_startup_timeout_seconds) is not float
+            or not math.isfinite(_startup_timeout_seconds)
+            or _startup_timeout_seconds <= 0.0
+        ):
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+        self._shared_memory_factory = shared_memory_factory
+        self._context = mp.get_context("spawn") if _process_context is None else _process_context
+        self._worker_target = run_transformer_worker if _worker_target is None else _worker_target
+        self._process_factory = (
+            _create_non_daemonic_worker_process if _process_factory is None else _process_factory
+        )
+        self._connection_waiter = (
+            _wait_for_worker_connections if _connection_waiter is None else _connection_waiter
+        )
+        self._monotonic_clock = _monotonic_clock
+        self._startup_timeout_seconds = _startup_timeout_seconds
+        self._poll_observer: _WorkerGroupPollObserver = _noop_worker_group_poll_observer
+        self._cancellation_signal = Event()
+        self._resources: _ParentSharedMemoryResources | None = None
+        self._training_sequences: tuple[TransformerTrainingSequence, ...] = ()
+        self._logical_shards: tuple[LogicalTrainingShard, ...] = ()
+        self._actual_worker_count = 0
+        self._assigned_shard_ids_by_worker: _WorkerShardAssignments = ()
+        self._workers: tuple[_ParentWorkerProcess, ...] = ()
+        self._started = False
+        self._cleanup_report: RequestScopedWorkerGroupCleanupReport | None = None
+
+    async def start(
+        self,
+        *,
+        num_layers: int,
+        current_weights: _Float32Array,
+        training_sequences: tuple[TransformerTrainingSequence, ...],
+        logical_shards: tuple[LogicalTrainingShard, ...],
+        actual_worker_count: int,
+        assigned_shard_ids_by_worker: _WorkerShardAssignments,
+        poll_observer: _WorkerGroupPollObserver,
+    ) -> None:
+        if (
+            self._started
+            or self._resources is not None
+            or self._workers
+            or self._cleanup_report is not None
+        ):
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_STATE)
+
+        self._poll_observer = poll_observer
+
+        try:
+            layout = build_transformer_parameter_layout(num_layers)
+        except (TypeError, ValueError) as exc:
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+            ) from exc
+
+        if actual_worker_count != len(
+            assigned_shard_ids_by_worker
+        ) or assigned_shard_ids_by_worker != build_worker_shard_assignments(actual_worker_count):
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+        resources = _ParentSharedMemoryResources(
+            layout,
+            self._cancellation_signal,
+        )
+        self._resources = resources
+        self._training_sequences = training_sequences
+        self._logical_shards = logical_shards
+        self._actual_worker_count = actual_worker_count
+        self._assigned_shard_ids_by_worker = assigned_shard_ids_by_worker
+
+        _allocate_parent_shared_array(
+            resources,
+            is_weight=True,
+            shared_memory_factory=self._shared_memory_factory,
+        )
+
+        for _ in range(LOGICAL_TRAINING_SHARD_COUNT):
+            _allocate_parent_shared_array(
+                resources,
+                is_weight=False,
+                shared_memory_factory=self._shared_memory_factory,
+            )
+
+        _initialize_parent_gradient_storages(resources)
+        _publish_parent_weights(
+            resources,
+            current_weights,
+        )
+
+        startup_deadline = self._monotonic_clock() + self._startup_timeout_seconds
+
+        for worker_index, assigned_shard_ids in enumerate(assigned_shard_ids_by_worker):
+            startup_config = _build_parent_worker_startup_config(
+                worker_index=worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+                num_layers=num_layers,
+                training_sequences=training_sequences,
+                logical_shards=logical_shards,
+                resources=resources,
+            )
+            self._spawn_worker(
+                startup_config=startup_config,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+
+        await self._wait_for_complete_startup(startup_deadline)
+        self._started = True
+
+    async def compute_epoch(
+        self,
+        *,
+        epoch: int,
+        current_weights: _Float32Array,
+        poll_observer: _WorkerGroupPollObserver,
+    ) -> tuple[LogicalTrainingShardResult, ...]:
+        resources = self._resources
+
+        if not self._started or resources is None:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+        if self._cancellation_signal.is_set():
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.CANCELLED)
+
+        for worker in self._workers:
+            if (
+                not worker.started
+                or not worker.ready
+                or worker.process_closed
+                or not worker.process.is_alive()
+            ):
+                worker.observed_exit_code = worker.process.exitcode
+                _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+        try:
+            _publish_parent_weights(
+                resources,
+                current_weights,
+            )
+        except RequestScopedWorkerGroupError as exc:
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+            ) from exc
+
+        epoch_deadline = self._monotonic_clock() + _WORKER_GROUP_EPOCH_TIMEOUT_SECONDS
+
+        for worker in self._workers:
+            try:
+                _send_worker_message(
+                    worker.parent_connection,
+                    ComputeMessage(
+                        protocol_version=WORKER_PROTOCOL_VERSION,
+                        worker_index=worker.worker_index,
+                        epoch=epoch,
+                        assigned_shard_ids=worker.assigned_shard_ids,
+                    ),
+                )
+            except (BrokenPipeError, EOFError, OSError) as exc:
+                raise RequestScopedWorkerGroupError(
+                    RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+                ) from exc
+
+        commits_by_worker: dict[int, ResultMessage] = {}
+
+        while len(commits_by_worker) != len(self._workers):
+            waitables: tuple[_WorkerWaitable, ...] = (
+                *(worker.parent_connection for worker in self._workers),
+                *(worker.process.sentinel for worker in self._workers),
+            )
+            ready_objects = await self._poll_waitables(
+                waitables,
+                deadline=epoch_deadline,
+                poll_observer=poll_observer,
+                wait_failure_code=(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE),
+                observe_cancellation=True,
+            )
+
+            if not ready_objects:
+                continue
+
+            for worker in self._workers:
+                if worker.process.sentinel not in ready_objects:
+                    continue
+
+                try:
+                    worker.process.join(0.0)
+                except (
+                    AssertionError,
+                    RuntimeError,
+                    ValueError,
+                ):
+                    pass
+
+                worker.observed_exit_code = worker.process.exitcode
+                _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+            for worker in self._workers:
+                if not any(
+                    ready_object is worker.parent_connection for ready_object in ready_objects
+                ):
+                    continue
+
+                try:
+                    raw_message = worker.parent_connection.recv()
+                except (EOFError, OSError) as exc:
+                    raise RequestScopedWorkerGroupError(
+                        RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+                    ) from exc
+
+                if worker.worker_index in commits_by_worker:
+                    _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+                if type(raw_message) is FailureMessage:
+                    try:
+                        failure = validate_failure_message(
+                            raw_message,
+                            expected_worker_index=worker.worker_index,
+                            expected_shard_ids=(worker.assigned_shard_ids),
+                        )
+                    except WorkerProtocolValidationError as exc:
+                        raise RequestScopedWorkerGroupError(
+                            RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+                        ) from exc
+
+                    if failure.phase is not WorkerFailurePhase.COMPUTE or failure.epoch != epoch:
+                        _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+                    _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+                try:
+                    commit = validate_result_message(
+                        raw_message,
+                        expected_worker_index=worker.worker_index,
+                        expected_epoch=epoch,
+                        expected_shard_ids=(worker.assigned_shard_ids),
+                    )
+                except WorkerProtocolValidationError as exc:
+                    raise RequestScopedWorkerGroupError(
+                        RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+                    ) from exc
+
+                commits_by_worker[worker.worker_index] = commit
+
+        for worker in self._workers:
+            if not worker.process.is_alive():
+                worker.observed_exit_code = worker.process.exitcode
+                _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+        return _materialize_committed_epoch_results(
+            resources=resources,
+            logical_shards=self._logical_shards,
+            workers=self._workers,
+            commits_by_worker=commits_by_worker,
+        )
+
+    async def cleanup(self) -> RequestScopedWorkerGroupCleanupReport:
+        if self._cleanup_report is not None:
+            return self._cleanup_report
+
+        secondary_failures: list[RequestScopedWorkerGroupCleanupFailureCode] = []
+        terminate_required = False
+        kill_required = False
+        cancellation_was_requested = self._cancellation_signal.is_set()
+
+        try:
+            _set_worker_group_cancellation(self._cancellation_signal)
+        except Exception:
+            _append_cleanup_failure_once(
+                secondary_failures,
+                RequestScopedWorkerGroupCleanupFailureCode.CANCELLATION_SIGNAL,
+            )
+
+        cleanup_poll_observer = (
+            _noop_worker_group_poll_observer if cancellation_was_requested else self._poll_observer
+        )
+        cooperative_required_worker_indexes = {
+            worker.worker_index for worker in self._workers if worker.started and worker.ready
+        }
+        stop_sent_worker_indexes: set[int] = set()
+        stopped_observed_worker_indexes: set[int] = set()
+        stopped_worker_indexes: set[int] = set()
+        cooperative_protocol_failed_worker_indexes: set[int] = set()
+
+        live_workers = _collect_live_parent_workers(
+            self._workers,
+            secondary_failures,
+        )
+        live_worker_indexes = {worker.worker_index for worker in live_workers}
+
+        for worker in self._workers:
+            if worker.worker_index not in cooperative_required_worker_indexes:
+                continue
+
+            if worker.worker_index not in live_worker_indexes:
+                cooperative_protocol_failed_worker_indexes.add(worker.worker_index)
+                continue
+
+            try:
+                _send_worker_stop_message(
+                    worker.parent_connection,
+                    worker.worker_index,
+                )
+                stop_sent_worker_indexes.add(worker.worker_index)
+            except Exception:
+                cooperative_protocol_failed_worker_indexes.add(worker.worker_index)
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.STOP_SEND,
+                )
+
+        cooperative_deadline = (
+            self._monotonic_clock() + _WORKER_GROUP_INTERIM_SHUTDOWN_TIMEOUT_SECONDS
+        )
+        cooperative_shutdown_completed = await self._wait_for_cooperative_shutdown_until(
+            deadline=cooperative_deadline,
+            poll_observer=cleanup_poll_observer,
+            cooperative_required_worker_indexes=(cooperative_required_worker_indexes),
+            stop_sent_worker_indexes=stop_sent_worker_indexes,
+            stopped_observed_worker_indexes=(stopped_observed_worker_indexes),
+            stopped_worker_indexes=stopped_worker_indexes,
+            cooperative_protocol_failed_worker_indexes=(cooperative_protocol_failed_worker_indexes),
+            secondary_failures=secondary_failures,
+        )
+
+        survivors = _collect_live_parent_workers(
+            self._workers,
+            secondary_failures,
+        )
+
+        if survivors:
+            cooperative_shutdown_completed = False
+            terminate_required = True
+
+            for worker in survivors:
+                try:
+                    _terminate_worker_process(worker.process)
+                except Exception:
+                    _append_cleanup_failure_once(
+                        secondary_failures,
+                        RequestScopedWorkerGroupCleanupFailureCode.TERMINATE,
+                    )
+
+            terminate_deadline = (
+                self._monotonic_clock() + _WORKER_GROUP_INTERIM_SHUTDOWN_TIMEOUT_SECONDS
+            )
+            await self._wait_for_started_workers_until(
+                deadline=terminate_deadline,
+                poll_observer=cleanup_poll_observer,
+                wait_failure_code=(RequestScopedWorkerGroupCleanupFailureCode.TERMINATE_WAIT),
+                secondary_failures=secondary_failures,
+            )
+
+        survivors = _collect_live_parent_workers(
+            self._workers,
+            secondary_failures,
+        )
+
+        if survivors:
+            kill_required = True
+
+            for worker in survivors:
+                try:
+                    _kill_worker_process(worker.process)
+                except Exception:
+                    _append_cleanup_failure_once(
+                        secondary_failures,
+                        RequestScopedWorkerGroupCleanupFailureCode.KILL,
+                    )
+
+            kill_deadline = self._monotonic_clock() + _WORKER_GROUP_INTERIM_SHUTDOWN_TIMEOUT_SECONDS
+            await self._wait_for_started_workers_until(
+                deadline=kill_deadline,
+                poll_observer=cleanup_poll_observer,
+                wait_failure_code=(RequestScopedWorkerGroupCleanupFailureCode.JOIN),
+                secondary_failures=secondary_failures,
+            )
+
+        final_live_workers = _collect_live_parent_workers(
+            self._workers,
+            secondary_failures,
+        )
+        final_live_worker_indexes = {worker.worker_index for worker in final_live_workers}
+
+        for worker in self._workers:
+            if not worker.started:
+                continue
+
+            if worker.worker_index in final_live_worker_indexes:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.JOIN,
+                )
+                continue
+
+            try:
+                _join_worker_process(worker.process, 0.0)
+            except Exception:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.JOIN,
+                )
+
+        for worker in self._workers:
+            if not worker.started:
+                continue
+
+            try:
+                worker.observed_exit_code = worker.process.exitcode
+            except Exception:
+                worker.observed_exit_code = None
+
+            if worker.observed_exit_code != 0:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.EXIT_CODE,
+                )
+
+        process_exit_codes = tuple(
+            worker.observed_exit_code for worker in self._workers if worker.started
+        )
+
+        if any(exit_code != 0 for exit_code in process_exit_codes):
+            cooperative_shutdown_completed = False
+
+        for worker in self._workers:
+            for connection in (
+                worker.parent_connection,
+                worker.child_connection,
+            ):
+                if connection is None:
+                    continue
+
+                try:
+                    _close_parent_worker_connection(connection)
+                except Exception:
+                    _append_cleanup_failure_once(
+                        secondary_failures,
+                        RequestScopedWorkerGroupCleanupFailureCode.PIPE_CLOSE,
+                    )
+
+            worker.child_connection = None
+
+        for worker in self._workers:
+            if worker.process_closed:
+                continue
+
+            if worker.worker_index in final_live_worker_indexes:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.PROCESS_CLOSE,
+                )
+                continue
+
+            try:
+                _close_parent_worker_process(worker.process)
+                worker.process_closed = True
+            except Exception:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.PROCESS_CLOSE,
+                )
+
+        if final_live_workers:
+            _append_cleanup_failure_once(
+                secondary_failures,
+                RequestScopedWorkerGroupCleanupFailureCode.INTERNAL,
+            )
+        elif self._resources is not None:
+            try:
+                release_failures = self._resources.release()
+            except Exception:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.INTERNAL,
+                )
+            else:
+                for failure in release_failures:
+                    _append_cleanup_failure_once(
+                        secondary_failures,
+                        failure,
+                    )
+
+        self._started = False
+        self._training_sequences = ()
+        self._logical_shards = ()
+        self._actual_worker_count = 0
+        self._assigned_shard_ids_by_worker = ()
+
+        report = RequestScopedWorkerGroupCleanupReport(
+            cooperative_shutdown_completed=(
+                cooperative_shutdown_completed and not terminate_required and not kill_required
+            ),
+            terminate_required=terminate_required,
+            kill_required=kill_required,
+            process_exit_codes=process_exit_codes,
+            secondary_failures=tuple(secondary_failures),
+        )
+        self._cleanup_report = report
+        return report
+
+    def allocation_snapshot(self) -> _RequestScopedSharedMemorySnapshot:
+        """Return immutable allocation diagnostics without live resource exposure."""
+        resources = self._resources
+
+        if resources is None:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_STATE)
+
+        return resources.allocation_snapshot()
+
+    def startup_snapshot(self) -> _RequestScopedWorkerStartupSnapshot:
+        """Return immutable startup diagnostics without process identifiers."""
+        return _RequestScopedWorkerStartupSnapshot(
+            worker_count=len(self._workers),
+            started_worker_count=sum(worker.started for worker in self._workers),
+            ready_worker_count=sum(worker.ready for worker in self._workers),
+            non_daemonic=tuple(worker.non_daemonic for worker in self._workers),
+            child_endpoints_closed=tuple(
+                worker.child_connection is None for worker in self._workers
+            ),
+            alive=tuple(
+                False if worker.process_closed else worker.started and worker.process.is_alive()
+                for worker in self._workers
+            ),
+        )
+
+    def copy_published_weights(self) -> _Float32Array:
+        """Return an independent copy for focused weight-publication tests."""
+        resources = self._resources
+
+        if resources is None:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_STATE)
+
+        return resources.copy_published_weights()
+
+    def request_cancellation(self) -> None:
+        """Set the request-owned cancellation signal without exposing it."""
+        self._cancellation_signal.set()
+
+    def _spawn_worker(
+        self,
+        *,
+        startup_config: WorkerStartupConfig,
+        assigned_shard_ids: tuple[int, ...],
+    ) -> None:
+        try:
+            parent_connection, child_connection = self._context.Pipe(
+                duplex=True,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+            ) from exc
+
+        try:
+            process = self._process_factory(
+                self._context,
+                self._worker_target,
+                child_connection,
+                startup_config.worker_index,
+                startup_config,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            _close_worker_connection_after_start_failure(
+                parent_connection,
+            )
+            _close_worker_connection_after_start_failure(
+                child_connection,
+            )
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+            ) from exc
+
+        worker = _ParentWorkerProcess(
+            worker_index=startup_config.worker_index,
+            assigned_shard_ids=assigned_shard_ids,
+            parent_connection=parent_connection,
+            child_connection=child_connection,
+            process=process,
+            non_daemonic=not bool(process.daemon),
+        )
+        self._workers = (*self._workers, worker)
+
+        if not worker.non_daemonic:
+            _close_worker_connection_after_start_failure(
+                parent_connection,
+            )
+            _close_worker_connection_after_start_failure(
+                child_connection,
+            )
+            worker.child_connection = None
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+        try:
+            process.start()
+            worker.started = True
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            _close_worker_connection_after_start_failure(
+                parent_connection,
+            )
+            _close_worker_connection_after_start_failure(
+                child_connection,
+            )
+            worker.child_connection = None
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+            ) from exc
+
+        try:
+            child_connection.close()
+        except OSError as exc:
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+            ) from exc
+
+        worker.child_connection = None
+
+    async def _wait_for_complete_startup(
+        self,
+        startup_deadline: float,
+    ) -> None:
+        while not all(worker.ready for worker in self._workers):
+            waitables = self._startup_waitables()
+
+            if not waitables:
+                _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+            ready_objects = await self._poll_waitables(
+                waitables,
+                deadline=startup_deadline,
+                poll_observer=self._poll_observer,
+                wait_failure_code=(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE),
+                observe_cancellation=True,
+            )
+
+            if not ready_objects:
+                continue
+
+            for worker in self._workers:
+                if not worker.started:
+                    continue
+
+                if worker.process.sentinel in ready_objects:
+                    try:
+                        worker.process.join(0.0)
+                    except (AssertionError, RuntimeError, ValueError):
+                        pass
+
+                    worker.observed_exit_code = worker.process.exitcode
+
+                    if not worker.ready:
+                        _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+            for worker in self._workers:
+                if not worker.started:
+                    continue
+
+                if not any(
+                    ready_object is worker.parent_connection for ready_object in ready_objects
+                ):
+                    continue
+
+                if worker.ready:
+                    _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+                try:
+                    raw_message = worker.parent_connection.recv()
+                except (EOFError, OSError) as exc:
+                    raise RequestScopedWorkerGroupError(
+                        RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+                    ) from exc
+
+                try:
+                    validate_ready_message(
+                        raw_message,
+                        expected_worker_index=worker.worker_index,
+                        expected_shard_ids=worker.assigned_shard_ids,
+                    )
+                except WorkerProtocolValidationError as exc:
+                    raise RequestScopedWorkerGroupError(
+                        RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+                    ) from exc
+
+                worker.ready = True
+
+        for worker in self._workers:
+            if not worker.started or not worker.process.is_alive():
+                worker.observed_exit_code = worker.process.exitcode
+                _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+    async def _wait_for_cooperative_shutdown_until(
+        self,
+        *,
+        deadline: float,
+        poll_observer: _WorkerGroupPollObserver,
+        cooperative_required_worker_indexes: set[int],
+        stop_sent_worker_indexes: set[int],
+        stopped_observed_worker_indexes: set[int],
+        stopped_worker_indexes: set[int],
+        cooperative_protocol_failed_worker_indexes: set[int],
+        secondary_failures: list[RequestScopedWorkerGroupCleanupFailureCode],
+    ) -> bool:
+        while True:
+            live_workers = _collect_live_parent_workers(
+                self._workers,
+                secondary_failures,
+            )
+            pending_stopped_workers = tuple(
+                worker
+                for worker in self._workers
+                if worker.worker_index in stop_sent_worker_indexes
+                and worker.worker_index not in stopped_observed_worker_indexes
+            )
+
+            if not live_workers and not pending_stopped_workers:
+                break
+
+            waitables: tuple[_WorkerWaitable, ...] = (
+                *(worker.parent_connection for worker in pending_stopped_workers),
+                *(worker.process.sentinel for worker in live_workers),
+            )
+
+            if not waitables:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.COOPERATIVE_WAIT,
+                )
+                return False
+
+            try:
+                ready_objects = await self._poll_waitables(
+                    waitables,
+                    deadline=deadline,
+                    poll_observer=poll_observer,
+                    wait_failure_code=(RequestScopedWorkerGroupFailureCode.CLEANUP_FAILURE),
+                    observe_cancellation=False,
+                )
+            except RequestScopedWorkerGroupError:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    RequestScopedWorkerGroupCleanupFailureCode.COOPERATIVE_WAIT,
+                )
+                return False
+
+            for worker in pending_stopped_workers:
+                if not any(
+                    ready_object is worker.parent_connection for ready_object in ready_objects
+                ):
+                    continue
+
+                stopped_observed_worker_indexes.add(worker.worker_index)
+
+                try:
+                    raw_message = worker.parent_connection.recv()
+                    validate_stopped_message(
+                        raw_message,
+                        expected_worker_index=worker.worker_index,
+                    )
+                except (
+                    EOFError,
+                    OSError,
+                    WorkerProtocolValidationError,
+                ):
+                    cooperative_protocol_failed_worker_indexes.add(worker.worker_index)
+                    _append_cleanup_failure_once(
+                        secondary_failures,
+                        RequestScopedWorkerGroupCleanupFailureCode.COOPERATIVE_WAIT,
+                    )
+                else:
+                    stopped_worker_indexes.add(worker.worker_index)
+
+            for worker in live_workers:
+                if worker.process.sentinel not in ready_objects:
+                    continue
+
+                try:
+                    _join_worker_process(worker.process, 0.0)
+                except Exception:
+                    _append_cleanup_failure_once(
+                        secondary_failures,
+                        RequestScopedWorkerGroupCleanupFailureCode.COOPERATIVE_WAIT,
+                    )
+
+                try:
+                    worker.observed_exit_code = worker.process.exitcode
+                except Exception:
+                    worker.observed_exit_code = None
+
+        if cooperative_protocol_failed_worker_indexes:
+            return False
+
+        if not cooperative_required_worker_indexes.issubset(stopped_worker_indexes):
+            _append_cleanup_failure_once(
+                secondary_failures,
+                RequestScopedWorkerGroupCleanupFailureCode.COOPERATIVE_WAIT,
+            )
+            return False
+
+        return not _collect_live_parent_workers(
+            self._workers,
+            secondary_failures,
+        )
+
+    async def _poll_waitables(
+        self,
+        waitables: tuple[_WorkerWaitable, ...],
+        *,
+        deadline: float,
+        poll_observer: _WorkerGroupPollObserver,
+        wait_failure_code: RequestScopedWorkerGroupFailureCode,
+        observe_cancellation: bool,
+    ) -> list[_WorkerWaitable]:
+        remaining = deadline - self._monotonic_clock()
+
+        if remaining <= 0.0:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.TIMEOUT)
+
+        poll_timeout = min(
+            _WORKER_GROUP_POLL_TIMEOUT_SECONDS,
+            remaining,
+        )
+        wait_task = asyncio.create_task(
+            asyncio.to_thread(
+                self._connection_waiter,
+                waitables,
+                poll_timeout,
+            )
+        )
+
+        try:
+            ready_objects = await asyncio.shield(wait_task)
+        except asyncio.CancelledError:
+            self._cancellation_signal.set()
+
+            if not wait_task.done():
+                try:
+                    await wait_task
+                except (OSError, ValueError):
+                    pass
+
+            raise
+        except (OSError, ValueError) as exc:
+            raise RequestScopedWorkerGroupError(
+                wait_failure_code,
+            ) from exc
+
+        try:
+            await poll_observer()
+        except asyncio.CancelledError:
+            self._cancellation_signal.set()
+            raise
+
+        if observe_cancellation and self._cancellation_signal.is_set():
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.CANCELLED)
+
+        if self._monotonic_clock() >= deadline:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.TIMEOUT)
+
+        return ready_objects
+
+    async def _wait_for_started_workers_until(
+        self,
+        *,
+        deadline: float,
+        poll_observer: _WorkerGroupPollObserver,
+        wait_failure_code: RequestScopedWorkerGroupCleanupFailureCode,
+        secondary_failures: list[RequestScopedWorkerGroupCleanupFailureCode],
+    ) -> bool:
+        while True:
+            live_workers = _collect_live_parent_workers(
+                self._workers,
+                secondary_failures,
+            )
+
+            if not live_workers:
+                return True
+
+            waitables: tuple[_WorkerWaitable, ...] = tuple(
+                worker.process.sentinel for worker in live_workers
+            )
+
+            try:
+                ready_objects = await self._poll_waitables(
+                    waitables,
+                    deadline=deadline,
+                    poll_observer=poll_observer,
+                    wait_failure_code=(RequestScopedWorkerGroupFailureCode.CLEANUP_FAILURE),
+                    observe_cancellation=False,
+                )
+            except RequestScopedWorkerGroupError:
+                _append_cleanup_failure_once(
+                    secondary_failures,
+                    wait_failure_code,
+                )
+                return False
+
+            for worker in live_workers:
+                if worker.process.sentinel not in ready_objects:
+                    continue
+
+                try:
+                    _join_worker_process(worker.process, 0.0)
+                except Exception:
+                    _append_cleanup_failure_once(
+                        secondary_failures,
+                        wait_failure_code,
+                    )
+
+                try:
+                    worker.observed_exit_code = worker.process.exitcode
+                except Exception:
+                    worker.observed_exit_code = None
+
+    def _startup_waitables(self) -> tuple[_WorkerWaitable, ...]:
+        connections: tuple[_WorkerWaitable, ...] = tuple(
+            worker.parent_connection for worker in self._workers if worker.started
+        )
+        sentinels: tuple[_WorkerWaitable, ...] = tuple(
+            worker.process.sentinel for worker in self._workers if worker.started
+        )
+        return (*connections, *sentinels)
+
+
+async def _noop_worker_group_poll_observer() -> None:
+    return None
+
+
+def _raise_group_error(
+    code: RequestScopedWorkerGroupFailureCode,
+) -> NoReturn:
+    raise RequestScopedWorkerGroupError(code)
+
+
+def _append_cleanup_failure_once(
+    failures: list[RequestScopedWorkerGroupCleanupFailureCode],
+    code: RequestScopedWorkerGroupCleanupFailureCode,
+) -> None:
+    if code not in failures:
+        failures.append(code)
+
+
+def _create_non_daemonic_worker_process(
+    context: BaseContext,
+    target: _WorkerProcessTarget,
+    child_connection: _WorkerConnection,
+    worker_index: int,
+    startup_config: object,
+) -> BaseProcess:
+    spawn_context = cast(
+        SpawnContext,
+        context,
+    )
+
+    return spawn_context.Process(
+        target=target,
+        args=(
+            child_connection,
+            worker_index,
+            startup_config,
+        ),
+        daemon=False,
+    )
+
+
+def _wait_for_worker_connections(
+    waitables: tuple[_WorkerWaitable, ...],
+    timeout: float | None,
+) -> list[_WorkerWaitable]:
+    ready_objects = wait_for_connections(
+        waitables,
+        timeout=timeout,
+    )
+
+    return cast(
+        list[_WorkerWaitable],
+        ready_objects,
+    )
+
+
+def _send_worker_message(
+    connection: _WorkerConnection,
+    message: object,
+) -> None:
+    connection.send(message)
+
+
+def _set_worker_group_cancellation(signal: Event) -> None:
+    signal.set()
+
+
+def _send_worker_stop_message(
+    connection: _WorkerConnection,
+    worker_index: int,
+) -> None:
+    _send_worker_message(
+        connection,
+        StopMessage(
+            protocol_version=WORKER_PROTOCOL_VERSION,
+            worker_index=worker_index,
+        ),
+    )
+
+
+def _terminate_worker_process(process: BaseProcess) -> None:
+    process.terminate()
+
+
+def _kill_worker_process(process: BaseProcess) -> None:
+    process.kill()
+
+
+def _join_worker_process(
+    process: BaseProcess,
+    timeout: float | None,
+) -> None:
+    process.join(timeout)
+
+
+def _close_parent_worker_connection(
+    connection: _WorkerConnection,
+) -> None:
+    connection.close()
+
+
+def _close_parent_worker_process(process: BaseProcess) -> None:
+    process.close()
+
+
+def _release_parent_memoryview(buffer: memoryview) -> None:
+    buffer.release()
+
+
+def _close_parent_shared_memory(handle: SharedMemory) -> None:
+    handle.close()
+
+
+def _unlink_parent_shared_memory(handle: SharedMemory) -> None:
+    handle.unlink()
+
+
+def _collect_live_parent_workers(
+    workers: tuple[_ParentWorkerProcess, ...],
+    secondary_failures: list[RequestScopedWorkerGroupCleanupFailureCode],
+) -> tuple[_ParentWorkerProcess, ...]:
+    live_workers: list[_ParentWorkerProcess] = []
+
+    for worker in workers:
+        if not worker.started or worker.process_closed:
+            continue
+
+        try:
+            is_alive = worker.process.is_alive()
+        except Exception:
+            _append_cleanup_failure_once(
+                secondary_failures,
+                RequestScopedWorkerGroupCleanupFailureCode.INTERNAL,
+            )
+            is_alive = True
+
+        if is_alive:
+            live_workers.append(worker)
+
+    return tuple(live_workers)
+
+
+def _close_worker_connection_after_start_failure(
+    connection: _WorkerConnection,
+) -> None:
+    try:
+        connection.close()
+    except OSError:
+        return
+
+
+def _validate_parent_shared_array(
+    storage: object,
+    *,
+    layout: TransformerParameterLayout,
+) -> _Float32Array:
+    if (
+        type(storage) is not np.ndarray
+        or storage.dtype != np.dtype(np.float32)
+        or storage.shape != (layout.total_float_count,)
+        or not storage.flags.c_contiguous
+        or not storage.flags.writeable
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+    return storage
+
+
+def _allocate_parent_shared_array(
+    resources: _ParentSharedMemoryResources,
+    *,
+    is_weight: bool,
+    shared_memory_factory: _SharedMemoryFactory,
+) -> _Float32Array:
+    try:
+        handle = shared_memory_factory(
+            create=True,
+            size=resources.layout.total_byte_count,
+        )
+    except (OSError, ValueError) as exc:
+        raise RequestScopedWorkerGroupError(
+            RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+        ) from exc
+
+    if is_weight:
+        if resources.weight_shared_memory is not None:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+        resources.weight_shared_memory = handle
+    else:
+        if len(resources.gradient_shared_memories) >= LOGICAL_TRAINING_SHARD_COUNT:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+        resources.gradient_shared_memories = (
+            *resources.gradient_shared_memories,
+            handle,
+        )
+
+    if handle.size < resources.layout.total_byte_count:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+    shared_buffer = handle.buf
+
+    if shared_buffer is None:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+    try:
+        exact_buffer = shared_buffer[: resources.layout.total_byte_count]
+    except (BufferError, ValueError) as exc:
+        raise RequestScopedWorkerGroupError(
+            RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+        ) from exc
+
+    if is_weight:
+        resources.weight_buffer = exact_buffer
+    else:
+        resources.gradient_buffers = (
+            *resources.gradient_buffers,
+            exact_buffer,
+        )
+
+    try:
+        storage = np.ndarray(
+            (resources.layout.total_float_count,),
+            dtype=np.float32,
+            buffer=exact_buffer,
+            order="C",
+        )
+    except (BufferError, TypeError, ValueError) as exc:
+        raise RequestScopedWorkerGroupError(
+            RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+        ) from exc
+
+    validated = _validate_parent_shared_array(
+        storage,
+        layout=resources.layout,
+    )
+
+    if is_weight:
+        resources.weight_storage = validated
+    else:
+        resources.gradient_storages = (
+            *resources.gradient_storages,
+            validated,
+        )
+
+    return validated
+
+
+def _initialize_parent_gradient_storages(
+    resources: _ParentSharedMemoryResources,
+) -> None:
+    if len(resources.gradient_storages) != LOGICAL_TRAINING_SHARD_COUNT:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+    for storage in resources.gradient_storages:
+        storage.fill(np.float32(0.0))
+
+        if np.count_nonzero(storage) != 0:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+
+def _publish_parent_weights(
+    resources: _ParentSharedMemoryResources,
+    current_weights: _Float32Array,
+) -> None:
+    destination = resources.weight_storage
+
+    if destination is None:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+    if (
+        current_weights.dtype != np.dtype(np.float32)
+        or current_weights.shape != (resources.layout.total_float_count,)
+        or not current_weights.flags.c_contiguous
+        or not np.isfinite(current_weights).all()
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    try:
+        np.copyto(
+            destination,
+            current_weights,
+            casting="no",
+        )
+    except (TypeError, ValueError) as exc:
+        raise RequestScopedWorkerGroupError(
+            RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+        ) from exc
+
+    if not np.isfinite(destination).all():
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+
+def _materialize_committed_epoch_results(
+    *,
+    resources: _ParentSharedMemoryResources,
+    logical_shards: tuple[LogicalTrainingShard, ...],
+    workers: tuple[_ParentWorkerProcess, ...],
+    commits_by_worker: dict[int, ResultMessage],
+) -> tuple[LogicalTrainingShardResult, ...]:
+    if (
+        len(logical_shards) != LOGICAL_TRAINING_SHARD_COUNT
+        or len(resources.gradient_storages) != LOGICAL_TRAINING_SHARD_COUNT
+        or len(commits_by_worker) != len(workers)
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+    losses_by_shard: list[float | None] = [None for _ in range(LOGICAL_TRAINING_SHARD_COUNT)]
+
+    for worker in workers:
+        commit = commits_by_worker.get(worker.worker_index)
+
+        if commit is None:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+        for shard_id, committed_shard_loss in zip(
+            worker.assigned_shard_ids,
+            commit.shard_losses,
+            strict=True,
+        ):
+            if (
+                shard_id < 0
+                or shard_id >= LOGICAL_TRAINING_SHARD_COUNT
+                or losses_by_shard[shard_id] is not None
+                or not math.isfinite(committed_shard_loss)
+            ):
+                _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+            losses_by_shard[shard_id] = float(committed_shard_loss)
+
+    results: list[LogicalTrainingShardResult] = []
+
+    for shard_id in range(LOGICAL_TRAINING_SHARD_COUNT):
+        shard = logical_shards[shard_id]
+        committed_loss = losses_by_shard[shard_id]
+        source = resources.gradient_storages[shard_id]
+
+        if (
+            shard.shard_index != shard_id
+            or committed_loss is None
+            or source.dtype != np.dtype(np.float32)
+            or source.shape != (resources.layout.total_float_count,)
+            or not source.flags.c_contiguous
+            or not np.isfinite(source).all()
+        ):
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+        copied_gradient = create_transformer_gradient_buffer(resources.layout)
+
+        try:
+            np.copyto(
+                copied_gradient.storage,
+                source,
+                casting="no",
+            )
+        except (TypeError, ValueError) as exc:
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+            ) from exc
+
+        if not np.isfinite(copied_gradient.storage).all():
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+        results.append(
+            LogicalTrainingShardResult(
+                shard=shard,
+                processed_sequence_count=(shard.stop_index - shard.start_index),
+                loss=committed_loss,
+                gradient=copied_gradient,
+            )
+        )
+
+    return tuple(results)
+
+
+def _build_parent_worker_startup_config(
+    *,
+    worker_index: int,
+    assigned_shard_ids: tuple[int, ...],
+    num_layers: int,
+    training_sequences: tuple[TransformerTrainingSequence, ...],
+    logical_shards: tuple[LogicalTrainingShard, ...],
+    resources: _ParentSharedMemoryResources,
+) -> WorkerStartupConfig:
+    weight_shared_memory = resources.weight_shared_memory
+    gradient_shared_memories = resources.gradient_shared_memories
+
+    if (
+        weight_shared_memory is None
+        or len(gradient_shared_memories) != LOGICAL_TRAINING_SHARD_COUNT
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE)
+
+    shard_by_id = {shard.shard_index: shard for shard in logical_shards}
+
+    try:
+        assigned_shards = tuple(
+            (
+                shard_by_id[shard_id].shard_index,
+                shard_by_id[shard_id].start_index,
+                shard_by_id[shard_id].stop_index,
+            )
+            for shard_id in assigned_shard_ids
+        )
+        gradient_shared_memory_names = tuple(
+            gradient_shared_memories[shard_id].name for shard_id in assigned_shard_ids
+        )
+    except (AttributeError, IndexError, KeyError) as exc:
+        raise RequestScopedWorkerGroupError(
+            RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+        ) from exc
+
+    config = WorkerStartupConfig(
+        protocol_version=WORKER_PROTOCOL_VERSION,
+        worker_index=worker_index,
+        num_layers=num_layers,
+        dtype_marker=WorkerNumericDType.FLOAT32,
+        canonical_float_count=resources.layout.total_float_count,
+        sequence_count=len(training_sequences),
+        weight_shared_memory_name=weight_shared_memory.name,
+        assigned_shards=assigned_shards,
+        gradient_shared_memory_names=gradient_shared_memory_names,
+        training_sequences=tuple(
+            (
+                sequence.input_ids,
+                sequence.target_ids,
+            )
+            for sequence in training_sequences
+        ),
+    )
+
+    try:
+        return validate_worker_startup_config(
+            config,
+            expected_worker_index=worker_index,
+        )
+    except WorkerProtocolValidationError as exc:
+        raise RequestScopedWorkerGroupError(
+            RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+        ) from exc
+
+
+def calculate_actual_worker_count(reported_cpu_count: int | None) -> int:
+    """Bound one reported host CPU count to the supported worker range."""
+    if reported_cpu_count is not None and type(reported_cpu_count) is not int:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    return min(
+        LOGICAL_TRAINING_SHARD_COUNT,
+        max(1, reported_cpu_count or 1),
+    )
+
+
+def build_worker_shard_assignments(
+    actual_worker_count: int,
+) -> _WorkerShardAssignments:
+    """Assign all four logical shard IDs statically by modulo worker index."""
+    if (
+        type(actual_worker_count) is not int
+        or actual_worker_count < 1
+        or actual_worker_count > LOGICAL_TRAINING_SHARD_COUNT
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    return tuple(
+        tuple(
+            shard_id
+            for shard_id in range(LOGICAL_TRAINING_SHARD_COUNT)
+            if shard_id % actual_worker_count == worker_index
+        )
+        for worker_index in range(actual_worker_count)
+    )
+
+
+def _validate_group_epoch(epoch: object) -> int:
+    if type(epoch) is not int or epoch < 0:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    return epoch
+
+
+def _canonical_group_weight_snapshot(
+    current_weights: object,
+    *,
+    layout: TransformerParameterLayout,
+) -> _Float32Array:
+    if (
+        type(current_weights) is not np.ndarray
+        or current_weights.dtype != np.dtype(np.float32)
+        or current_weights.shape != (layout.total_float_count,)
+        or not current_weights.flags.c_contiguous
+        or not np.isfinite(current_weights).all()
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    snapshot = np.array(
+        current_weights,
+        dtype=np.float32,
+        order="C",
+        copy=True,
+    )
+
+    if (
+        snapshot.dtype != np.dtype(np.float32)
+        or snapshot.shape != (layout.total_float_count,)
+        or not snapshot.flags.c_contiguous
+        or not np.isfinite(snapshot).all()
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INTERNAL_FAILURE)
+
+    return snapshot
+
+
+def _validate_group_training_sequences(
+    training_sequences: object,
+    *,
+    vocabulary_size: int,
+) -> tuple[TransformerTrainingSequence, ...]:
+    if type(training_sequences) is not tuple:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    validated: list[TransformerTrainingSequence] = []
+
+    for sequence in training_sequences:
+        if type(sequence) is not TransformerTrainingSequence:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+        if (
+            type(sequence.input_ids) is not tuple
+            or type(sequence.target_ids) is not tuple
+            or len(sequence.input_ids) != TRANSFORMER_SEQUENCE_LENGTH
+            or len(sequence.target_ids) != TRANSFORMER_SEQUENCE_LENGTH
+        ):
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+        for token_id in (*sequence.input_ids, *sequence.target_ids):
+            if type(token_id) is not int or token_id < 0 or token_id >= vocabulary_size:
+                _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+        validated.append(sequence)
+
+    return tuple(validated)
+
+
+def _validate_group_logical_shards(
+    logical_shards: object,
+    *,
+    sequence_count: int,
+) -> tuple[LogicalTrainingShard, ...]:
+    if type(logical_shards) is not tuple:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    if any(type(shard) is not LogicalTrainingShard for shard in logical_shards):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    expected = build_logical_training_shards(sequence_count)
+
+    if logical_shards != expected:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    return cast(tuple[LogicalTrainingShard, ...], logical_shards)
+
+
+def _validate_group_poll_observer(
+    poll_observer: object,
+) -> _WorkerGroupPollObserver:
+    if poll_observer is None:
+        return _noop_worker_group_poll_observer
+
+    if not callable(poll_observer):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    return cast(_WorkerGroupPollObserver, poll_observer)
+
+
+def _validate_group_runtime(
+    runtime: object,
+) -> _RequestScopedWorkerGroupRuntime:
+    if not all(
+        callable(getattr(runtime, method_name, None))
+        for method_name in ("start", "compute_epoch", "cleanup")
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+    return cast(_RequestScopedWorkerGroupRuntime, runtime)
+
+
+def _validate_group_cleanup_report(
+    report: object,
+) -> RequestScopedWorkerGroupCleanupReport:
+    if type(report) is not RequestScopedWorkerGroupCleanupReport:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.CLEANUP_FAILURE)
+
+    if (
+        type(report.cooperative_shutdown_completed) is not bool
+        or type(report.terminate_required) is not bool
+        or type(report.kill_required) is not bool
+        or type(report.process_exit_codes) is not tuple
+        or type(report.secondary_failures) is not tuple
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.CLEANUP_FAILURE)
+
+    if any(
+        exit_code is not None and type(exit_code) is not int
+        for exit_code in report.process_exit_codes
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.CLEANUP_FAILURE)
+
+    if any(
+        type(failure) is not RequestScopedWorkerGroupCleanupFailureCode
+        for failure in report.secondary_failures
+    ):
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.CLEANUP_FAILURE)
+
+    return report
+
+
+def _copy_group_epoch_results(
+    results: object,
+    *,
+    expected_shards: tuple[LogicalTrainingShard, ...],
+    layout: TransformerParameterLayout,
+) -> tuple[LogicalTrainingShardResult, ...]:
+    if type(results) is not tuple or len(results) != LOGICAL_TRAINING_SHARD_COUNT:
+        _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+    copied_results: list[LogicalTrainingShardResult] = []
+
+    for result, expected_shard in zip(
+        results,
+        expected_shards,
+        strict=True,
+    ):
+        if type(result) is not LogicalTrainingShardResult:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+        validated_result = result
+
+        try:
+            source = _validate_shard_result(
+                validated_result,
+                expected_shard=expected_shard,
+                layout=layout,
+            )
+        except _WorkerExecutionError as exc:
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+            ) from exc
+
+        copied_gradient = create_transformer_gradient_buffer(layout)
+
+        try:
+            np.copyto(
+                copied_gradient.storage,
+                source,
+                casting="no",
+            )
+        except (TypeError, ValueError) as exc:
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+            ) from exc
+
+        if not np.isfinite(copied_gradient.storage).all():
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE)
+
+        copied_results.append(
+            LogicalTrainingShardResult(
+                shard=expected_shard,
+                processed_sequence_count=validated_result.processed_sequence_count,
+                loss=float(validated_result.loss),
+                gradient=copied_gradient,
+            )
+        )
+
+    return tuple(copied_results)
+
+
+class RequestScopedWorkerGroup:
+    """Parent-owned lifecycle boundary for one Transformer worker group."""
+
+    __slots__ = (
+        "_actual_worker_count",
+        "_assigned_shard_ids_by_worker",
+        "_cleanup_report",
+        "_initial_weights",
+        "_layout",
+        "_logical_shards",
+        "_poll_observer",
+        "_primary_failure_code",
+        "_runtime",
+        "_startup_completed",
+        "_state",
+        "_training_sequences",
+    )
+
+    def __init__(
+        self,
+        num_layers: int,
+        current_weights: _Float32Array,
+        training_sequences: tuple[TransformerTrainingSequence, ...],
+        logical_shards: tuple[LogicalTrainingShard, ...],
+        *,
+        poll_observer: _WorkerGroupPollObserver | None = None,
+        _runtime: _RequestScopedWorkerGroupRuntime | None = None,
+    ) -> None:
+        if (
+            type(num_layers) is not int
+            or num_layers < TRANSFORMER_MIN_LAYER_COUNT
+            or num_layers > TRANSFORMER_MAX_LAYER_COUNT
+        ):
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_INPUT)
+
+        try:
+            layout = build_transformer_parameter_layout(num_layers)
+        except (TypeError, ValueError) as exc:
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.INVALID_INPUT,
+            ) from exc
+
+        validated_sequences = _validate_group_training_sequences(
+            training_sequences,
+            vocabulary_size=layout.vocabulary_size,
+        )
+        validated_shards = _validate_group_logical_shards(
+            logical_shards,
+            sequence_count=len(validated_sequences),
+        )
+
+        actual_worker_count = calculate_actual_worker_count(os.cpu_count())
+        assigned_shard_ids_by_worker = build_worker_shard_assignments(
+            actual_worker_count,
+        )
+
+        self._layout = layout
+        self._initial_weights: _Float32Array | None = _canonical_group_weight_snapshot(
+            current_weights,
+            layout=layout,
+        )
+        self._training_sequences = validated_sequences
+        self._logical_shards = validated_shards
+        self._actual_worker_count = actual_worker_count
+        self._assigned_shard_ids_by_worker = assigned_shard_ids_by_worker
+        self._poll_observer = _validate_group_poll_observer(poll_observer)
+        self._runtime = _validate_group_runtime(
+            _SharedMemoryRequestScopedWorkerGroupRuntime() if _runtime is None else _runtime
+        )
+        self._startup_completed = False
+        self._state = RequestScopedWorkerGroupState.ALLOCATED
+        self._cleanup_report: RequestScopedWorkerGroupCleanupReport | None = None
+        self._primary_failure_code: RequestScopedWorkerGroupFailureCode | None = None
+
+    @property
+    def state(self) -> RequestScopedWorkerGroupState:
+        """Return the current stable parent-side lifecycle state."""
+        return self._state
+
+    @property
+    def cleanup_report(self) -> RequestScopedWorkerGroupCleanupReport | None:
+        """Return the published immutable cleanup report, when available."""
+        return self._cleanup_report
+
+    @property
+    def primary_failure_code(
+        self,
+    ) -> RequestScopedWorkerGroupFailureCode | None:
+        """Return the first run failure without replacing it with cleanup failures."""
+        return self._primary_failure_code
+
+    @property
+    def successful(self) -> bool:
+        """Return whether the group closed without run, forced, or cleanup failure."""
+        return (
+            self._startup_completed
+            and self._state is RequestScopedWorkerGroupState.CLOSED
+            and self._primary_failure_code is None
+            and self._cleanup_report is not None
+            and self._cleanup_report.successful
+        )
+
+    def _require_state(
+        self,
+        required: RequestScopedWorkerGroupState,
+    ) -> None:
+        if self._state is not required:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_STATE)
+
+    def _record_primary_failure(
+        self,
+        code: RequestScopedWorkerGroupFailureCode,
+    ) -> None:
+        if self._primary_failure_code is None:
+            self._primary_failure_code = code
+
+        if self._state not in (
+            RequestScopedWorkerGroupState.STOPPING,
+            RequestScopedWorkerGroupState.CLOSED,
+        ):
+            self._state = RequestScopedWorkerGroupState.FAILED
+
+    async def _start(self) -> None:
+        self._require_state(RequestScopedWorkerGroupState.ALLOCATED)
+        self._state = RequestScopedWorkerGroupState.STARTING
+        initial_weights = self._initial_weights
+
+        if initial_weights is None:
+            self._record_primary_failure(
+                RequestScopedWorkerGroupFailureCode.INTERNAL_FAILURE,
+            )
+            report = await self.cleanup()
+            raise RequestScopedWorkerGroupError(
+                RequestScopedWorkerGroupFailureCode.INTERNAL_FAILURE,
+                cleanup_report=report,
+            )
+
+        try:
+            await self._runtime.start(
+                num_layers=self._layout.num_layers,
+                current_weights=initial_weights,
+                training_sequences=self._training_sequences,
+                logical_shards=self._logical_shards,
+                actual_worker_count=self._actual_worker_count,
+                assigned_shard_ids_by_worker=(self._assigned_shard_ids_by_worker),
+                poll_observer=self._poll_observer,
+            )
+        except asyncio.CancelledError:
+            self._record_primary_failure(
+                RequestScopedWorkerGroupFailureCode.CANCELLED,
+            )
+            self._initial_weights = None
+            await self.cleanup()
+            raise
+        except RequestScopedWorkerGroupError as exc:
+            self._record_primary_failure(exc.code)
+            self._initial_weights = None
+            report = await self.cleanup()
+            raise RequestScopedWorkerGroupError(
+                exc.code,
+                cleanup_report=report,
+            ) from exc
+        except Exception as exc:
+            code = RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE
+            self._record_primary_failure(code)
+            self._initial_weights = None
+            report = await self.cleanup()
+            raise RequestScopedWorkerGroupError(
+                code,
+                cleanup_report=report,
+            ) from exc
+
+        self._initial_weights = None
+        self._startup_completed = True
+        self._state = RequestScopedWorkerGroupState.READY
+
+    async def compute_epoch(
+        self,
+        epoch: int,
+        current_weights: _Float32Array,
+    ) -> tuple[LogicalTrainingShardResult, ...]:
+        """Compute one non-overlapping epoch and return independent shard results."""
+        self._require_state(RequestScopedWorkerGroupState.READY)
+        validated_epoch = _validate_group_epoch(epoch)
+        weight_snapshot = _canonical_group_weight_snapshot(
+            current_weights,
+            layout=self._layout,
+        )
+        self._state = RequestScopedWorkerGroupState.COMPUTING
+
+        try:
+            raw_results = await self._runtime.compute_epoch(
+                epoch=validated_epoch,
+                current_weights=weight_snapshot,
+                poll_observer=self._poll_observer,
+            )
+            copied_results = _copy_group_epoch_results(
+                raw_results,
+                expected_shards=self._logical_shards,
+                layout=self._layout,
+            )
+        except asyncio.CancelledError:
+            self._record_primary_failure(
+                RequestScopedWorkerGroupFailureCode.CANCELLED,
+            )
+            await self.cleanup()
+            raise
+        except RequestScopedWorkerGroupError as exc:
+            self._record_primary_failure(exc.code)
+            raise
+        except Exception as exc:
+            code = RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+            self._record_primary_failure(code)
+            raise RequestScopedWorkerGroupError(code) from exc
+
+        if self._state is not RequestScopedWorkerGroupState.COMPUTING:
+            code = RequestScopedWorkerGroupFailureCode.CANCELLED
+            self._record_primary_failure(code)
+            raise RequestScopedWorkerGroupError(code)
+
+        self._state = RequestScopedWorkerGroupState.READY
+        return copied_results
+
+    async def cleanup(
+        self,
+    ) -> RequestScopedWorkerGroupCleanupReport:
+        """Idempotently clean the group and publish secondary diagnostics."""
+        if self._cleanup_report is not None:
+            return self._cleanup_report
+
+        if self._state is RequestScopedWorkerGroupState.STOPPING:
+            _raise_group_error(RequestScopedWorkerGroupFailureCode.INVALID_STATE)
+
+        self._state = RequestScopedWorkerGroupState.STOPPING
+        cleanup_task = asyncio.create_task(self._runtime.cleanup())
+        cancellation: asyncio.CancelledError | None = None
+
+        try:
+            raw_report = await asyncio.shield(cleanup_task)
+            report = _validate_group_cleanup_report(raw_report)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            self._record_primary_failure(
+                RequestScopedWorkerGroupFailureCode.CANCELLED,
+            )
+
+            try:
+                raw_report = await cleanup_task
+                report = _validate_group_cleanup_report(raw_report)
+            except Exception:
+                report = RequestScopedWorkerGroupCleanupReport(
+                    cooperative_shutdown_completed=False,
+                    terminate_required=False,
+                    kill_required=False,
+                    process_exit_codes=(),
+                    secondary_failures=(RequestScopedWorkerGroupCleanupFailureCode.INTERNAL,),
+                )
+        except Exception:
+            report = RequestScopedWorkerGroupCleanupReport(
+                cooperative_shutdown_completed=False,
+                terminate_required=False,
+                kill_required=False,
+                process_exit_codes=(),
+                secondary_failures=(RequestScopedWorkerGroupCleanupFailureCode.INTERNAL,),
+            )
+
+        self._cleanup_report = report
+
+        if not report.successful and self._primary_failure_code is None:
+            self._primary_failure_code = RequestScopedWorkerGroupFailureCode.CLEANUP_FAILURE
+
+        self._initial_weights = None
+        self._state = RequestScopedWorkerGroupState.CLOSED
+
+        if cancellation is not None:
+            raise cancellation
+
+        return report
+
+
+async def create_request_scoped_worker_group(
+    num_layers: int,
+    current_weights: _Float32Array,
+    training_sequences: tuple[TransformerTrainingSequence, ...],
+    logical_shards: tuple[LogicalTrainingShard, ...],
+    *,
+    poll_observer: _WorkerGroupPollObserver | None = None,
+    _runtime: _RequestScopedWorkerGroupRuntime | None = None,
+) -> RequestScopedWorkerGroup:
+    """Create and completely start one independent request-owned worker group."""
+    group = RequestScopedWorkerGroup(
+        num_layers,
+        current_weights,
+        training_sequences,
+        logical_shards,
+        poll_observer=poll_observer,
+        _runtime=_runtime,
+    )
+    await group._start()
+    return group
+
+
+class _WorkerExecutionError(RuntimeError):
+    """Internal sanitized failure classification used by the worker target."""
+
+    __slots__ = ("phase", "code", "epoch")
+
+    def __init__(
+        self,
+        phase: WorkerFailurePhase,
+        code: WorkerFailureCode,
+        *,
+        epoch: int | None = None,
+    ) -> None:
+        super().__init__("Transformer worker execution failed.")
+        self.phase = phase
+        self.code = code
+        self.epoch = epoch
+
+
+def _raise_protocol_error(
+    code: WorkerFailureCode = WorkerFailureCode.INVALID_PROTOCOL,
+) -> NoReturn:
+    raise WorkerProtocolValidationError(code)
+
+
+def _require_exact_int(value: object, *, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        _raise_protocol_error()
+    return value
+
+
+def _require_exact_tuple(value: object) -> tuple[object, ...]:
+    if type(value) is not tuple:
+        _raise_protocol_error()
+    return value
+
+
+def _validate_protocol_version(protocol_version: object) -> None:
+    if type(protocol_version) is not int or protocol_version != WORKER_PROTOCOL_VERSION:
+        _raise_protocol_error()
+
+
+def _validate_worker_identity(worker_index: object, expected_worker_index: int) -> int:
+    validated_expected = _require_exact_int(expected_worker_index)
+    validated_worker = _require_exact_int(worker_index)
+
+    if validated_worker != validated_expected:
+        _raise_protocol_error()
+
+    return validated_worker
+
+
+def _validate_shard_ids(
+    shard_ids: object,
+    *,
+    allow_empty: bool,
+) -> tuple[int, ...]:
+    values = _require_exact_tuple(shard_ids)
+    validated: list[int] = []
+
+    for value in values:
+        shard_id = _require_exact_int(value)
+
+        if shard_id >= LOGICAL_TRAINING_SHARD_COUNT:
+            _raise_protocol_error()
+
+        validated.append(shard_id)
+
+    result = tuple(validated)
+
+    if not allow_empty and not result:
+        _raise_protocol_error()
+
+    if result != tuple(sorted(result)) or len(set(result)) != len(result):
+        _raise_protocol_error()
+
+    return result
+
+
+def _validate_expected_shard_ids(expected_shard_ids: object) -> tuple[int, ...]:
+    return _validate_shard_ids(
+        expected_shard_ids,
+        allow_empty=True,
+    )
+
+
+def _validate_epoch(epoch: object) -> int:
+    return _require_exact_int(epoch)
+
+
+def _validate_protocol_float(value: object) -> float:
+    if type(value) is not float or not math.isfinite(value):
+        _raise_protocol_error()
+
+    return value
+
+
+def _validate_shared_memory_name(value: object) -> str:
+    if type(value) is not str or not value:
+        _raise_protocol_error()
+
+    return value
+
+
+def _validate_training_sequences(
+    payload: object,
+    *,
+    expected_sequence_count: int,
+    vocabulary_size: int,
+) -> tuple[_SequencePayload, ...]:
+    sequence_values = _require_exact_tuple(payload)
+
+    if len(sequence_values) != expected_sequence_count:
+        _raise_protocol_error()
+
+    validated_sequences: list[_SequencePayload] = []
+
+    for sequence_value in sequence_values:
+        pair = _require_exact_tuple(sequence_value)
+
+        if len(pair) != 2:
+            _raise_protocol_error()
+
+        input_values = _require_exact_tuple(pair[0])
+        target_values = _require_exact_tuple(pair[1])
+
+        if (
+            len(input_values) != TRANSFORMER_SEQUENCE_LENGTH
+            or len(target_values) != TRANSFORMER_SEQUENCE_LENGTH
+        ):
+            _raise_protocol_error()
+
+        validated_input: list[int] = []
+        validated_target: list[int] = []
+
+        for token_id in input_values:
+            validated_id = _require_exact_int(token_id)
+
+            if validated_id >= vocabulary_size:
+                _raise_protocol_error()
+
+            validated_input.append(validated_id)
+
+        for token_id in target_values:
+            validated_id = _require_exact_int(token_id)
+
+            if validated_id >= vocabulary_size:
+                _raise_protocol_error()
+
+            validated_target.append(validated_id)
+
+        validated_sequences.append(
+            (
+                tuple(validated_input),
+                tuple(validated_target),
+            )
+        )
+
+    return tuple(validated_sequences)
+
+
+def _validate_assigned_shards(
+    payload: object,
+    *,
+    sequence_count: int,
+) -> tuple[_ShardPayload, ...]:
+    shard_values = _require_exact_tuple(payload)
+
+    if not shard_values:
+        _raise_protocol_error()
+
+    canonical_shards = build_logical_training_shards(sequence_count)
+    validated_shards: list[_ShardPayload] = []
+
+    for shard_value in shard_values:
+        descriptor = _require_exact_tuple(shard_value)
+
+        if len(descriptor) != 3:
+            _raise_protocol_error()
+
+        shard_id = _require_exact_int(descriptor[0])
+        start_index = _require_exact_int(descriptor[1])
+        stop_index = _require_exact_int(descriptor[2])
+
+        if shard_id >= LOGICAL_TRAINING_SHARD_COUNT or stop_index < start_index:
+            _raise_protocol_error()
+
+        canonical = canonical_shards[shard_id]
+        candidate = (shard_id, start_index, stop_index)
+        expected = (
+            canonical.shard_index,
+            canonical.start_index,
+            canonical.stop_index,
+        )
+
+        if candidate != expected:
+            _raise_protocol_error()
+
+        validated_shards.append(candidate)
+
+    result = tuple(validated_shards)
+    shard_ids = tuple(shard[0] for shard in result)
+
+    if shard_ids != tuple(sorted(shard_ids)) or len(set(shard_ids)) != len(shard_ids):
+        _raise_protocol_error()
+
+    return result
+
+
+def validate_worker_startup_config(
+    config: object,
+    *,
+    expected_worker_index: int,
+) -> WorkerStartupConfig:
+    """Validate one exact startup record at the worker trust boundary."""
+    if type(config) is not WorkerStartupConfig:
+        _raise_protocol_error()
+
+    validated = config
+    _validate_protocol_version(validated.protocol_version)
+    _validate_worker_identity(validated.worker_index, expected_worker_index)
+
+    num_layers = _require_exact_int(validated.num_layers)
+
+    if num_layers < TRANSFORMER_MIN_LAYER_COUNT or num_layers > TRANSFORMER_MAX_LAYER_COUNT:
+        _raise_protocol_error(WorkerFailureCode.INVALID_LAYOUT)
+
+    if type(validated.dtype_marker) is not WorkerNumericDType:
+        _raise_protocol_error(WorkerFailureCode.INVALID_LAYOUT)
+
+    if validated.dtype_marker is not WorkerNumericDType.FLOAT32:
+        _raise_protocol_error(WorkerFailureCode.INVALID_LAYOUT)
+
+    sequence_count = _require_exact_int(validated.sequence_count)
+    canonical_float_count = _require_exact_int(
+        validated.canonical_float_count,
+        minimum=1,
+    )
+
+    try:
+        layout = build_transformer_parameter_layout(num_layers)
+    except (TypeError, ValueError):
+        _raise_protocol_error(WorkerFailureCode.INVALID_LAYOUT)
+
+    if canonical_float_count != layout.total_float_count:
+        _raise_protocol_error(WorkerFailureCode.INVALID_LAYOUT)
+
+    weight_name = _validate_shared_memory_name(validated.weight_shared_memory_name)
+
+    try:
+        sequences = _validate_training_sequences(
+            validated.training_sequences,
+            expected_sequence_count=sequence_count,
+            vocabulary_size=layout.vocabulary_size,
+        )
+    except WorkerProtocolValidationError as exc:
+        raise WorkerProtocolValidationError(WorkerFailureCode.INVALID_LAYOUT) from exc
+
+    try:
+        assigned_shards = _validate_assigned_shards(
+            validated.assigned_shards,
+            sequence_count=sequence_count,
+        )
+    except WorkerProtocolValidationError as exc:
+        raise WorkerProtocolValidationError(WorkerFailureCode.INVALID_OWNERSHIP) from exc
+
+    gradient_names_raw = _require_exact_tuple(validated.gradient_shared_memory_names)
+    gradient_names = tuple(_validate_shared_memory_name(name) for name in gradient_names_raw)
+
+    if len(gradient_names) != len(assigned_shards):
+        _raise_protocol_error(WorkerFailureCode.INVALID_OWNERSHIP)
+
+    if len(set(gradient_names)) != len(gradient_names):
+        _raise_protocol_error(WorkerFailureCode.INVALID_OWNERSHIP)
+
+    if weight_name in gradient_names:
+        _raise_protocol_error(WorkerFailureCode.INVALID_OWNERSHIP)
+
+    if (
+        validated.num_layers != num_layers
+        or validated.canonical_float_count != canonical_float_count
+        or validated.sequence_count != sequence_count
+        or validated.weight_shared_memory_name != weight_name
+        or validated.assigned_shards != assigned_shards
+        or validated.gradient_shared_memory_names != gradient_names
+        or validated.training_sequences != sequences
+    ):
+        _raise_protocol_error()
+
+    return validated
+
+
+def validate_ready_message(
+    message: object,
+    *,
+    expected_worker_index: int,
+    expected_shard_ids: tuple[int, ...],
+) -> ReadyMessage:
+    """Validate one exact ready record before parent startup commit."""
+    if type(message) is not ReadyMessage:
+        _raise_protocol_error()
+
+    validated = message
+    _validate_protocol_version(validated.protocol_version)
+    _validate_worker_identity(
+        validated.worker_index,
+        expected_worker_index,
+    )
+    actual_shard_ids = _validate_shard_ids(
+        validated.assigned_shard_ids,
+        allow_empty=False,
+    )
+    expected = _validate_expected_shard_ids(expected_shard_ids)
+
+    if actual_shard_ids != expected:
+        _raise_protocol_error()
+
+    return validated
+
+
+def validate_compute_message(
+    message: object,
+    *,
+    expected_worker_index: int,
+    expected_shard_ids: tuple[int, ...],
+) -> ComputeMessage:
+    """Validate one exact compute command at the worker trust boundary."""
+    if type(message) is not ComputeMessage:
+        _raise_protocol_error()
+
+    validated = message
+    _validate_protocol_version(validated.protocol_version)
+    _validate_worker_identity(
+        validated.worker_index,
+        expected_worker_index,
+    )
+    _validate_epoch(validated.epoch)
+    actual_shard_ids = _validate_shard_ids(
+        validated.assigned_shard_ids,
+        allow_empty=False,
+    )
+    expected = _validate_expected_shard_ids(expected_shard_ids)
+
+    if actual_shard_ids != expected:
+        _raise_protocol_error()
+
+    return validated
+
+
+def validate_result_message(
+    message: object,
+    *,
+    expected_worker_index: int,
+    expected_epoch: int,
+    expected_shard_ids: tuple[int, ...],
+) -> ResultMessage:
+    """Validate one complete result commit marker before reading shared buffers."""
+    if type(message) is not ResultMessage:
+        _raise_protocol_error()
+
+    validated = message
+    _validate_protocol_version(validated.protocol_version)
+    _validate_worker_identity(
+        validated.worker_index,
+        expected_worker_index,
+    )
+    expected_validated_epoch = _validate_epoch(expected_epoch)
+    actual_epoch = _validate_epoch(validated.epoch)
+
+    if actual_epoch != expected_validated_epoch:
+        _raise_protocol_error()
+
+    actual_shard_ids = _validate_shard_ids(
+        validated.assigned_shard_ids,
+        allow_empty=False,
+    )
+    expected = _validate_expected_shard_ids(expected_shard_ids)
+
+    if actual_shard_ids != expected:
+        _raise_protocol_error()
+
+    losses_raw = _require_exact_tuple(validated.shard_losses)
+    losses = tuple(_validate_protocol_float(loss) for loss in losses_raw)
+
+    if len(losses) != len(actual_shard_ids) or validated.shard_losses != losses:
+        _raise_protocol_error()
+
+    return validated
+
+
+def validate_failure_message(
+    message: object,
+    *,
+    expected_worker_index: int,
+    expected_shard_ids: tuple[int, ...],
+) -> FailureMessage:
+    """Validate one sanitized worker failure record."""
+    if type(message) is not FailureMessage:
+        _raise_protocol_error()
+
+    validated = message
+    _validate_protocol_version(validated.protocol_version)
+    _validate_worker_identity(
+        validated.worker_index,
+        expected_worker_index,
+    )
+
+    if type(validated.phase) is not WorkerFailurePhase:
+        _raise_protocol_error()
+
+    if type(validated.code) is not WorkerFailureCode:
+        _raise_protocol_error()
+
+    if validated.epoch is not None:
+        _validate_epoch(validated.epoch)
+
+    actual_shard_ids = _validate_shard_ids(
+        validated.assigned_shard_ids,
+        allow_empty=True,
+    )
+    expected = _validate_expected_shard_ids(expected_shard_ids)
+
+    if actual_shard_ids != expected:
+        _raise_protocol_error()
+
+    return validated
+
+
+def validate_stop_message(
+    message: object,
+    *,
+    expected_worker_index: int,
+) -> StopMessage:
+    """Validate one cooperative stop command."""
+    if type(message) is not StopMessage:
+        _raise_protocol_error()
+
+    validated = message
+    _validate_protocol_version(validated.protocol_version)
+    _validate_worker_identity(
+        validated.worker_index,
+        expected_worker_index,
+    )
+    return validated
+
+
+def validate_stopped_message(
+    message: object,
+    *,
+    expected_worker_index: int,
+) -> StoppedMessage:
+    """Validate one clean worker shutdown marker."""
+    if type(message) is not StoppedMessage:
+        _raise_protocol_error()
+
+    validated = message
+    _validate_protocol_version(validated.protocol_version)
+    _validate_worker_identity(
+        validated.worker_index,
+        expected_worker_index,
+    )
+    return validated
+
+
+def _iter_parameter_arrays(
+    views: TransformerParameterViews,
+) -> tuple[_Float32Array, ...]:
+    arrays: list[_Float32Array] = [
+        views.tok_emb,
+        views.pos_emb,
+    ]
+
+    for block in views.blocks:
+        arrays.extend(
+            [
+                block.ln1_gamma,
+                block.ln1_beta,
+                block.w_q,
+                block.b_q,
+                block.w_k,
+                block.b_k,
+                block.w_v,
+                block.b_v,
+                block.w_o,
+                block.b_o,
+                block.ln2_gamma,
+                block.ln2_beta,
+                block.ff1_w,
+                block.ff1_b,
+                block.ff2_w,
+                block.ff2_b,
+            ]
+        )
+
+    arrays.extend(
+        [
+            views.ln_f_gamma,
+            views.ln_f_beta,
+            views.head_w,
+            views.head_b,
+        ]
+    )
+
+    return tuple(arrays)
+
+
+def _validate_flat_shared_array(
+    array: _Float32Array,
+    *,
+    layout: TransformerParameterLayout,
+    require_writable: bool,
+) -> None:
+    if (
+        type(array) is not np.ndarray
+        or array.dtype != np.dtype(np.float32)
+        or array.shape != (layout.total_float_count,)
+        or not array.flags.c_contiguous
+        or array.flags.writeable is not require_writable
+    ):
+        raise _WorkerExecutionError(
+            WorkerFailurePhase.STARTUP,
+            WorkerFailureCode.INVALID_LAYOUT,
+        )
+
+
+def _validate_parameter_view_writability(
+    views: TransformerParameterViews,
+    *,
+    require_writable: bool,
+) -> None:
+    for array in _iter_parameter_arrays(views):
+        if array.flags.writeable is not require_writable:
+            raise _WorkerExecutionError(
+                WorkerFailurePhase.STARTUP,
+                WorkerFailureCode.INVALID_LAYOUT,
+            )
+
+
+def _probe_weight_read_only_enforcement(
+    storage: _Float32Array,
+    views: TransformerParameterViews,
+) -> None:
+    first_view = _iter_parameter_arrays(views)[0]
+    before = storage.tobytes(order="C")
+    original = np.float32(first_view.reshape(-1, order="C")[0])
+
+    try:
+        first_view.reshape(-1, order="C")[0] = original
+    except ValueError:
+        pass
+    else:
+        raise _WorkerExecutionError(
+            WorkerFailurePhase.STARTUP,
+            WorkerFailureCode.INVALID_OWNERSHIP,
+        )
+
+    if storage.tobytes(order="C") != before:
+        raise _WorkerExecutionError(
+            WorkerFailurePhase.STARTUP,
+            WorkerFailureCode.INVALID_OWNERSHIP,
+        )
+
+
+def _reconstruct_sequences(
+    config: WorkerStartupConfig,
+) -> tuple[TransformerTrainingSequence, ...]:
+    return tuple(
+        TransformerTrainingSequence(
+            input_ids=input_ids,
+            target_ids=target_ids,
+        )
+        for input_ids, target_ids in config.training_sequences
+    )
+
+
+def _reconstruct_shards(
+    config: WorkerStartupConfig,
+) -> tuple[LogicalTrainingShard, ...]:
+    return tuple(
+        LogicalTrainingShard(
+            shard_index=shard_id,
+            start_index=start_index,
+            stop_index=stop_index,
+        )
+        for shard_id, start_index, stop_index in config.assigned_shards
+    )
+
+
+@dataclass(slots=True)
+class _AttachedWorkerResources:
+    layout: TransformerParameterLayout
+    sequences: tuple[TransformerTrainingSequence, ...]
+    shards: tuple[LogicalTrainingShard, ...]
+    weight_shared_memory: SharedMemory | None
+    gradient_shared_memories: tuple[SharedMemory, ...]
+    weight_buffer: memoryview | None
+    gradient_buffers: tuple

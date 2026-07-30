@@ -1,0 +1,12 @@
+{
+  "words": [
+    "king",
+    "queen",
+    "dog",
+    "cat"
+  ],
+  "epochs": 10,
+  "dimensions": 4,
+  "windowSize": 1,
+  "negativeSamples": 1
+}

@@ -1,0 +1,5314 @@
+# Chunk number: 34 of 37
+
+ np.shares_memory(probabilities, first[0])
+        assert not np.shares_memory(gradient, first[1])
+
+
+def test_gradient_buffers_are_fresh_and_canonical(
+    parameters: TransformerParameterViews,
+) -> None:
+    first = create_transformer_gradient_buffer(parameters.layout)
+    second = create_transformer_gradient_buffer(parameters.layout)
+
+    assert first.storage.shape == (parameters.layout.total_float_count,)
+    assert first.storage.dtype == np.dtype(np.float32)
+    assert first.storage.flags.c_contiguous
+    assert_array_equal(
+        first.storage,
+        np.zeros_like(first.storage),
+    )
+    assert not np.shares_memory(
+        first.storage,
+        second.storage,
+    )
+
+    for parameter_array in (
+        parameters.tok_emb,
+        parameters.pos_emb,
+        parameters.head_w,
+    ):
+        assert not np.shares_memory(
+            first.storage,
+            parameter_array,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_input",
+    [
+        [],
+        (0,) * (TRANSFORMER_CONTEXT_LENGTH + 1),
+        (True, 1),
+        (-1, 1),
+        (0, 392),
+    ],
+)
+def test_forward_rejects_invalid_token_sequences(
+    invalid_input: object,
+    parameters: TransformerParameterViews,
+) -> None:
+    with pytest.raises(
+        (
+            TypeError,
+            ValueError,
+        )
+    ):
+        calculate_transformer_forward(
+            invalid_input,
+            parameters,
+        )
+
+
+def test_forward_rejects_nonfinite_parameters_without_partial_result(
+    parameters: TransformerParameterViews,
+) -> None:
+    original = np.float32(parameters.tok_emb[0, 0])
+
+    try:
+        parameters.tok_emb[0, 0] = np.float32(np.nan)
+
+        with pytest.raises(
+            FloatingPointError,
+            match="non-finite",
+        ):
+            calculate_transformer_forward(
+                (0, 1, 2, 3),
+                parameters,
+            )
+    finally:
+        parameters.tok_emb[0, 0] = original```
+
+########################################
+Here is my code for backend/tests/test_transformer_training.py BELOW:
+########################################
+
+```python
+# tests/test_transformer_training.py
+from __future__ import annotations
+
+import inspect
+import json
+import math
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pytest
+from how_llms_work.ml.math_utils import Mulberry32
+from how_llms_work.ml.transformer import (
+    InitializedTransformerParameters,
+    LogicalTrainingShard,
+    LogicalTrainingShardResult,
+    TransformerGradientBuffer,
+    TransformerTrainingRun,
+    build_logical_training_shards,
+    build_transformer_parameter_layout,
+    build_transformer_report_epochs,
+    calculate_logical_training_shard,
+    create_transformer_gradient_buffer,
+    create_transformer_training_run,
+    get_transformer_preprocessing,
+    initialize_transformer_parameters,
+)
+
+_REFERENCE_PATH = Path(__file__).parent / "fixtures" / "transformer_training_reference.json"
+
+
+def _load_reference() -> dict[str, Any]:
+    with _REFERENCE_PATH.open(encoding="utf-8") as reference_file:
+        return json.load(reference_file)
+
+
+_REFERENCE = _load_reference()
+
+
+def _selected_indices() -> np.ndarray:
+    return np.asarray(
+        _REFERENCE["layout"]["selectedIndices"],
+        dtype=np.intp,
+    )
+
+
+def _new_initialized_parameters() -> InitializedTransformerParameters:
+    layout = build_transformer_parameter_layout(1)
+    initialized = initialize_transformer_parameters(
+        layout,
+        Mulberry32(42),
+    )
+    initialized.storage[_selected_indices()] = np.asarray(
+        _REFERENCE["initialSelectedWeights"],
+        dtype=np.float32,
+    )
+    return initialized
+
+
+def _new_run(
+    *,
+    requested_epochs: int = 1,
+    sequence_count: int | None = None,
+) -> TransformerTrainingRun:
+    effective_sequence_count = (
+        int(_REFERENCE["layout"]["sequenceCount"]) if sequence_count is None else sequence_count
+    )
+    return create_transformer_training_run(
+        _new_initialized_parameters(),
+        sequence_count=effective_sequence_count,
+        requested_epochs=requested_epochs,
+    )
+
+
+def _epoch_reference(epoch: int) -> dict[str, Any]:
+    return _REFERENCE["epochs"][epoch]
+
+
+def _build_epoch_results(
+    run: TransformerTrainingRun,
+    epoch_reference: dict[str, Any],
+    arrival_order: tuple[int, int, int, int],
+) -> tuple[LogicalTrainingShardResult, ...]:
+    selected_indices = _selected_indices()
+    by_shard: dict[int, LogicalTrainingShardResult] = {}
+
+    for shard_index in range(4):
+        gradient = create_transformer_gradient_buffer(
+            run.parameters.layout,
+        )
+        gradient.storage[selected_indices] = np.asarray(
+            epoch_reference["shardSelectedGradients"][shard_index],
+            dtype=np.float32,
+        )
+        shard = run.logical_training_shards[shard_index]
+
+        by_shard[shard_index] = LogicalTrainingShardResult(
+            shard=shard,
+            processed_sequence_count=shard.stop_index - shard.start_index,
+            loss=float(epoch_reference["shardLosses"][shard_index]),
+            gradient=gradient,
+        )
+
+    return tuple(by_shard[shard_index] for shard_index in arrival_order)
+
+
+def _build_zero_results(
+    run: TransformerTrainingRun,
+    *,
+    first_loss: float = 0.0,
+) -> tuple[LogicalTrainingShardResult, ...]:
+    results: list[LogicalTrainingShardResult] = []
+
+    for shard_index, shard in enumerate(run.logical_training_shards):
+        gradient = create_transformer_gradient_buffer(
+            run.parameters.layout,
+        )
+        results.append(
+            LogicalTrainingShardResult(
+                shard=shard,
+                processed_sequence_count=shard.stop_index - shard.start_index,
+                loss=first_loss if shard_index == 0 else 0.0,
+                gradient=gradient,
+            )
+        )
+
+    return tuple(results)
+
+
+def _persistent_snapshot(
+    run: TransformerTrainingRun,
+) -> tuple[
+    bytes,
+    bytes,
+    bytes,
+    int,
+    int | None,
+    float | None,
+    tuple[object, ...],
+]:
+    return (
+        run.weights.tobytes(),
+        run.first_moments.tobytes(),
+        run.second_moments.tobytes(),
+        run.next_epoch,
+        run.last_completed_epoch,
+        run.last_completed_loss,
+        run.updates,
+    )
+
+
+def _assert_failed_transition_preserved_state(
+    run: TransformerTrainingRun,
+    shard_results: object,
+) -> None:
+    before = _persistent_snapshot(run)
+
+    with pytest.raises(
+        (
+            TypeError,
+            ValueError,
+            FloatingPointError,
+        )
+    ):
+        run.advance_epoch(shard_results)
+
+    assert _persistent_snapshot(run) == before
+    assert run.is_failed
+    assert not run.is_active
+    assert not run.is_complete
+
+    with pytest.raises(RuntimeError, match="failed"):
+        run.advance_epoch(shard_results)
+
+
+def test_reference_fixture_has_independent_provenance_and_layout() -> None:
+    assert "Independent scalar" in _REFERENCE["provenance"]["source"]
+    assert "imports no how_llms_work" in _REFERENCE["provenance"]["source"]
+    assert _REFERENCE["layout"]["numLayers"] == 1
+    assert _REFERENCE["layout"]["totalFloatCount"] == 39_272
+    assert _REFERENCE["layout"]["sequenceCount"] == 3
+
+    run = _new_run()
+
+    assert run.parameters.layout.num_layers == 1
+    assert run.parameters.layout.total_float_count == 39_272
+
+
+@pytest.mark.parametrize(
+    "requested_epochs",
+    [
+        0,
+        1,
+        49,
+        50,
+        51,
+        99,
+        100,
+        101,
+        5_000,
+    ],
+)
+def test_transformer_report_schedule_matches_reference(
+    requested_epochs: int,
+) -> None:
+    expected = tuple(int(epoch) for epoch in _REFERENCE["reportSchedules"][str(requested_epochs)])
+
+    actual = build_transformer_report_epochs(requested_epochs)
+
+    assert actual == expected
+    assert actual[0] == 0
+    assert actual[-1] == requested_epochs
+    assert len(actual) == len(set(actual))
+
+
+@pytest.mark.parametrize(
+    ("value", "error_type"),
+    [
+        (True, TypeError),
+        (1.5, TypeError),
+        ("1", TypeError),
+        (-1, ValueError),
+    ],
+)
+def test_requested_final_epoch_is_strictly_validated(
+    value: object,
+    error_type: type[Exception],
+) -> None:
+    with pytest.raises(error_type):
+        create_transformer_training_run(
+            _new_initialized_parameters(),
+            sequence_count=3,
+            requested_epochs=value,
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "error_type"),
+    [
+        (True, TypeError),
+        (1.5, TypeError),
+        ("3", TypeError),
+        (-1, ValueError),
+    ],
+)
+def test_sequence_count_is_strictly_validated(
+    value: object,
+    error_type: type[Exception],
+) -> None:
+    with pytest.raises(error_type):
+        create_transformer_training_run(
+            _new_initialized_parameters(),
+            sequence_count=value,
+            requested_epochs=0,
+        )
+
+
+def test_fresh_runs_own_independent_float32_and_float64_state() -> None:
+    initialized = _new_initialized_parameters()
+    run_a = create_transformer_training_run(
+        initialized,
+        sequence_count=3,
+        requested_epochs=1,
+    )
+    run_b = create_transformer_training_run(
+        initialized,
+        sequence_count=3,
+        requested_epochs=1,
+    )
+
+    assert np.array_equal(run_a.weights, run_b.weights)
+    assert not np.shares_memory(run_a.weights, initialized.storage)
+    assert not np.shares_memory(run_b.weights, initialized.storage)
+    assert not np.shares_memory(run_a.weights, run_b.weights)
+
+    for run in (run_a, run_b):
+        float32_arrays = (
+            run.weights,
+            run.first_moments,
+            run.second_moments,
+            run.reduced_gradient.storage,
+        )
+
+        for array in float32_arrays:
+            assert array.dtype == np.dtype(np.float32)
+            assert array.ndim == 1
+            assert array.shape == (run.parameters.layout.total_float_count,)
+            assert array.flags.c_contiguous
+            assert array.flags.writeable
+            assert np.isfinite(array).all()
+
+        assert np.count_nonzero(run.first_moments) == 0
+        assert np.count_nonzero(run.second_moments) == 0
+        assert np.count_nonzero(run.reduced_gradient.storage) == 0
+
+        scratch_metadata = run.adam_scratch_metadata
+
+        assert len(scratch_metadata) == 2
+        assert scratch_metadata[0][0] != scratch_metadata[1][0]
+        assert scratch_metadata[0][1] == "float64"
+        assert scratch_metadata[1][1] == "float64"
+        assert scratch_metadata[0][2] == run.weights.shape
+        assert scratch_metadata[1][2] == run.weights.shape
+
+        assert (
+            sum("adam_scratch" in slot_name for slot_name in TransformerTrainingRun.__slots__) == 2
+        )
+        assert not any("candidate" in slot_name for slot_name in TransformerTrainingRun.__slots__)
+
+        for left_index, left in enumerate(float32_arrays):
+            for right in float32_arrays[left_index + 1 :]:
+                assert not np.shares_memory(left, right)
+
+    assert run_a.adam_scratch_metadata[0][0] != run_b.adam_scratch_metadata[0][0]
+    assert run_a.adam_scratch_metadata[1][0] != run_b.adam_scratch_metadata[1][0]
+    assert run_a.updates == ()
+    assert run_b.updates == ()
+
+
+def test_training_factory_accepts_no_worker_or_persistence_configuration() -> None:
+    factory_parameters = inspect.signature(create_transformer_training_run).parameters
+    constructor_parameters = inspect.signature(TransformerTrainingRun).parameters
+    forbidden_names = {
+        "saved_model",
+        "path",
+        "file",
+        "file_handle",
+        "resume",
+        "checkpoint",
+        "worker_count",
+        "process_group",
+        "learning_rate",
+        "beta1",
+        "beta2",
+        "epsilon",
+        "weight_decay",
+    }
+
+    assert forbidden_names.isdisjoint(factory_parameters)
+    assert forbidden_names.isdisjoint(constructor_parameters)
+
+
+def test_ordered_reduction_and_two_adam_steps_match_reference() -> None:
+    run = _new_run(requested_epochs=1)
+    selected_indices = _selected_indices()
+    weight_identity = id(run.weights)
+    first_moment_identity = id(run.first_moments)
+    second_moment_identity = id(run.second_moments)
+    reduction_identity = id(run.reduced_gradient.storage)
+    scratch_metadata = run.adam_scratch_metadata
+
+    epoch_zero_results = _build_epoch_results(
+        run,
+        _epoch_reference(0),
+        (3, 2, 1, 0),
+    )
+    shard_gradient_bytes = tuple(result.gradient.storage.tobytes() for result in epoch_zero_results)
+
+    observation_zero = run.advance_epoch(epoch_zero_results)
+    epoch_zero = _epoch_reference(0)
+
+    assert observation_zero.epoch == 0
+    assert observation_zero.loss == epoch_zero["orderedLoss"]
+    assert observation_zero.update is not None
+    assert observation_zero.update.epoch == 0
+    assert observation_zero.update.loss == epoch_zero["publicLoss"]
+
+    np.testing.assert_array_equal(
+        run.reduced_gradient.storage[selected_indices],
+        np.asarray(
+            epoch_zero["orderedSelectedGradient"],
+            dtype=np.float32,
+        ),
+    )
+    np.testing.assert_allclose(
+        run.first_moments[selected_indices],
+        np.asarray(
+            epoch_zero["selectedFirstMoment"],
+            dtype=np.float32,
+        ),
+        rtol=float(_REFERENCE["tolerances"]["momentRtol"]),
+        atol=float(_REFERENCE["tolerances"]["momentAtol"]),
+    )
+    np.testing.assert_allclose(
+        run.second_moments[selected_indices],
+        np.asarray(
+            epoch_zero["selectedSecondMoment"],
+            dtype=np.float32,
+        ),
+        rtol=float(_REFERENCE["tolerances"]["momentRtol"]),
+        atol=float(_REFERENCE["tolerances"]["momentAtol"]),
+    )
+    np.testing.assert_allclose(
+        run.weights[selected_indices],
+        np.asarray(
+            epoch_zero["selectedWeight"],
+            dtype=np.float32,
+        ),
+        rtol=float(_REFERENCE["tolerances"]["weightRtol"]),
+        atol=float(_REFERENCE["tolerances"]["weightAtol"]),
+    )
+
+    assert (
+        tuple(result.gradient.storage.tobytes() for result in epoch_zero_results)
+        == shard_gradient_bytes
+    )
+    assert run.reduced_gradient.storage[selected_indices[1]] == np.float32(6.0)
+    assert run.reduced_gradient.storage[selected_indices[1]] != np.float32(1.5)
+
+    assert id(run.weights) == weight_identity
+    assert id(run.first_moments) == first_moment_identity
+    assert id(run.second_moments) == second_moment_identity
+    assert id(run.reduced_gradient.storage) == reduction_identity
+    assert run.adam_scratch_metadata == scratch_metadata
+    assert run.next_epoch == 1
+    assert run.last_completed_epoch == 0
+    assert run.last_completed_loss == epoch_zero["orderedLoss"]
+    assert run.is_active
+
+    observation_one = run.advance_epoch(
+        _build_epoch_results(
+            run,
+            _epoch_reference(1),
+            (1, 3, 0, 2),
+        )
+    )
+    epoch_one = _epoch_reference(1)
+
+    assert observation_one.epoch == 1
+    assert observation_one.loss == epoch_one["orderedLoss"]
+    assert observation_one.update is not None
+    assert observation_one.update.epoch == 1
+    assert observation_one.update.loss == epoch_one["publicLoss"]
+
+    np.testing.assert_array_equal(
+        run.reduced_gradient.storage[selected_indices],
+        np.asarray(
+            epoch_one["orderedSelectedGradient"],
+            dtype=np.float32,
+        ),
+    )
+    np.testing.assert_allclose(
+        run.first_moments[selected_indices],
+        np.asarray(
+            epoch_one["selectedFirstMoment"],
+            dtype=np.float32,
+        ),
+        rtol=float(_REFERENCE["tolerances"]["momentRtol"]),
+        atol=float(_REFERENCE["tolerances"]["momentAtol"]),
+    )
+    np.testing.assert_allclose(
+        run.second_moments[selected_indices],
+        np.asarray(
+            epoch_one["selectedSecondMoment"],
+            dtype=np.float32,
+        ),
+        rtol=float(_REFERENCE["tolerances"]["momentRtol"]),
+        atol=float(_REFERENCE["tolerances"]["momentAtol"]),
+    )
+    np.testing.assert_allclose(
+        run.weights[selected_indices],
+        np.asarray(
+            epoch_one["selectedWeight"],
+            dtype=np.float32,
+        ),
+        rtol=float(_REFERENCE["tolerances"]["weightRtol"]),
+        atol=float(_REFERENCE["tolerances"]["weightAtol"]),
+    )
+
+    assert id(run.weights) == weight_identity
+    assert id(run.first_moments) == first_moment_identity
+    assert id(run.second_moments) == second_moment_identity
+    assert id(run.reduced_gradient.storage) == reduction_identity
+    assert run.adam_scratch_metadata == scratch_metadata
+
+    assert run.next_epoch == 2
+    assert run.last_completed_epoch == 1
+    assert run.last_completed_loss == epoch_one["orderedLoss"]
+    assert run.is_complete
+    assert not run.is_active
+    assert not run.is_failed
+    assert tuple(update.epoch for update in run.updates) == (0, 1)
+
+    with pytest.raises(RuntimeError, match="completed"):
+        run.advance_epoch(
+            _build_epoch_results(
+                run,
+                _epoch_reference(1),
+                (0, 1, 2, 3),
+            )
+        )
+
+    assert run.is_complete
+    assert not run.is_failed
+
+
+def test_arrival_order_does_not_change_reduction_or_adam_result() -> None:
+    completed_runs: list[TransformerTrainingRun] = []
+
+    for arrival_order in _REFERENCE["arrivalOrders"].values():
+        run = _new_run(requested_epochs=0)
+        run.advance_epoch(
+            _build_epoch_results(
+                run,
+                _epoch_reference(0),
+                tuple(arrival_order),
+            )
+        )
+        completed_runs.append(run)
+
+    baseline = completed_runs[0]
+
+    for run in completed_runs[1:]:
+        np.testing.assert_array_equal(
+            run.reduced_gradient.storage,
+            baseline.reduced_gradient.storage,
+        )
+        np.testing.assert_array_equal(
+            run.first_moments,
+            baseline.first_moments,
+        )
+        np.testing.assert_array_equal(
+            run.second_moments,
+            baseline.second_moments,
+        )
+        np.testing.assert_array_equal(
+            run.weights,
+            baseline.weights,
+        )
+        assert run.last_completed_loss == baseline.last_completed_loss
+        assert run.updates == baseline.updates
+        assert run.last_completed_epoch == baseline.last_completed_epoch
+        assert run.is_complete
+
+
+def test_fresh_runs_remain_isolated_during_threaded_execution() -> None:
+    arrival_orders = tuple(tuple(order) for order in _REFERENCE["arrivalOrders"].values())
+
+    def execute(
+        arrival_order: tuple[int, int, int, int],
+    ) -> TransformerTrainingRun:
+        run = _new_run(requested_epochs=0)
+        run.advance_epoch(
+            _build_epoch_results(
+                run,
+                _epoch_reference(0),
+                arrival_order,
+            )
+        )
+        return run
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        runs = tuple(executor.map(execute, arrival_orders))
+
+    baseline = runs[0]
+
+    for run in runs[1:]:
+        np.testing.assert_array_equal(run.weights, baseline.weights)
+        np.testing.assert_array_equal(run.first_moments, baseline.first_moments)
+        np.testing.assert_array_equal(run.second_moments, baseline.second_moments)
+        assert run.updates == baseline.updates
+
+    for left_index, left in enumerate(runs):
+        for right in runs[left_index + 1 :]:
+            assert not np.shares_memory(left.weights, right.weights)
+            assert not np.shares_memory(
+                left.first_moments,
+                right.first_moments,
+            )
+            assert not np.shares_memory(
+                left.second_moments,
+                right.second_moments,
+            )
+            assert not np.shares_memory(
+                left.reduced_gradient.storage,
+                right.reduced_gradient.storage,
+            )
+            assert left.adam_scratch_metadata[0][0] != right.adam_scratch_metadata[0][0]
+            assert left.adam_scratch_metadata[1][0] != right.adam_scratch_metadata[1][0]
+
+    protected_weight = float(runs[1].weights[0])
+    runs[0].weights[0] += np.float32(1.0)
+
+    assert float(runs[1].weights[0]) == protected_weight
+
+
+def test_direct_shard_calculation_integrates_with_epoch_transition() -> None:
+    preprocessing = get_transformer_preprocessing()
+    sequences = tuple(preprocessing.training_sequences[:4])
+    initialized = _new_initialized_parameters()
+    run = create_transformer_training_run(
+        initialized,
+        sequence_count=len(sequences),
+        requested_epochs=0,
+    )
+    shards = build_logical_training_shards(len(sequences))
+    results = tuple(
+        calculate_logical_training_shard(
+            sequences,
+            shard,
+            run.parameters.views,
+        )
+        for shard in shards
+    )
+
+    observation = run.advance_epoch(
+        (
+            results[2],
+            results[0],
+            results[3],
+            results[1],
+        )
+    )
+
+    assert observation.epoch == 0
+    assert math.isfinite(observation.loss)
+    assert observation.update is not None
+    assert np.isfinite(run.weights).all()
+    assert np.isfinite(run.first_moments).all()
+    assert np.isfinite(run.second_moments).all()
+    assert run.is_complete
+
+
+def test_inclusive_epoch_progression_processes_zero_through_final() -> None:
+    run = _new_run(
+        requested_epochs=4,
+        sequence_count=4,
+    )
+    completed_epochs: list[int] = []
+
+    while run.is_active:
+        observation = run.advance_epoch(_build_zero_results(run))
+        completed_epochs.append(observation.epoch)
+
+    assert completed_epochs == [0, 1, 2, 3, 4]
+    assert run.next_epoch == 5
+    assert run.last_completed_epoch == 4
+    assert run.is_complete
+    assert tuple(update.epoch for update in run.updates) == (0, 1, 2, 3, 4)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing",
+        "duplicate",
+        "negative_shard",
+        "high_shard",
+        "wrong_metadata",
+        "wrong_processed_count",
+        "nonfinite_loss",
+        "wrong_result_type",
+        "empty_loss",
+        "empty_gradient",
+    ],
+)
+def test_malformed_shard_sets_fail_without_persistent_commit(
+    case: str,
+) -> None:
+    run = _new_run(requested_epochs=0)
+    results = list(
+        _build_epoch_results(
+            run,
+            _epoch_reference(0),
+            (0, 1, 2, 3),
+        )
+    )
+
+    if case == "missing":
+        malformed: object = tuple(results[:3])
+    elif case == "duplicate":
+        malformed = (
+            results[0],
+            results[1],
+            results[2],
+            results[0],
+        )
+    elif case == "negative_shard":
+        results[0] = replace(
+            results[0],
+            shard=LogicalTrainingShard(
+                shard_index=-1,
+                start_index=0,
+                stop_index=1,
+            ),
+        )
+        malformed = tuple(results)
+    elif case == "high_shard":
+        results[0] = replace(
+            results[0],
+            shard=LogicalTrainingShard(
+                shard_index=4,
+                start_index=0,
+                stop_index=1,
+            ),
+        )
+        malformed = tuple(results)
+    elif case == "wrong_metadata":
+        results[0] = replace(
+            results[0],
+            shard=LogicalTrainingShard(
+                shard_index=0,
+                start_index=0,
+                stop_index=2,
+            ),
+        )
+        malformed = tuple(results)
+    elif case == "wrong_processed_count":
+        results[0] = replace(
+            results[0],
+            processed_sequence_count=2,
+        )
+        malformed = tuple(results)
+    elif case == "nonfinite_loss":
+        results[0] = replace(
+            results[0],
+            loss=float("inf"),
+        )
+        malformed = tuple(results)
+    elif case == "wrong_result_type":
+        malformed = (
+            results[0],
+            results[1],
+            results[2],
+            object(),
+        )
+    elif case == "empty_loss":
+        results[3] = replace(
+            results[3],
+            loss=1.0,
+        )
+        malformed = tuple(results)
+    else:
+        results[3].gradient.storage[0] = np.float32(1.0)
+        malformed = tuple(results)
+
+    _assert_failed_transition_preserved_state(
+        run,
+        malformed,
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "wrong_layout",
+        "wrong_length",
+        "wrong_dtype",
+        "noncontiguous",
+        "nonfinite",
+        "foreign_views",
+        "parent_alias",
+    ],
+)
+def test_invalid_gradient_storage_fails_without_persistent_commit(
+    case: str,
+) -> None:
+    run = _new_run(requested_epochs=0)
+    results = list(
+        _build_epoch_results(
+            run,
+            _epoch_reference(0),
+            (0, 1, 2, 3),
+        )
+    )
+    original_gradient = results[0].gradient
+    total_float_count = run.parameters.layout.total_float_count
+
+    if case == "wrong_layout":
+        other_layout = build_transformer_parameter_layout(2)
+        other_initialized = initialize_transformer_parameters(
+            other_layout,
+            Mulberry32(42),
+        )
+        bad_gradient = create_transformer_gradient_buffer(
+            other_initialized.layout,
+        )
+    elif case == "wrong_length":
+        bad_storage = np.zeros(
+            total_float_count - 1,
+            dtype=np.float32,
+        )
+        bad_gradient = TransformerGradientBuffer(
+            layout=original_gradient.layout,
+            storage=bad_storage,
+            views=original_gradient.views,
+        )
+    elif case == "wrong_dtype":
+        bad_storage = np.zeros(
+            total_float_count,
+            dtype=np.float64,
+        )
+        bad_gradient = TransformerGradientBuffer(
+            layout=original_gradient.layout,
+            storage=bad_storage,
+            views=original_gradient.views,
+        )
+    elif case == "noncontiguous":
+        backing = np.zeros(
+            total_float_count * 2,
+            dtype=np.float32,
+        )
+        bad_storage = backing[::2]
+        assert not bad_storage.flags.c_contiguous
+
+        bad_gradient = TransformerGradientBuffer(
+            layout=original_gradient.layout,
+            storage=bad_storage,
+            views=original_gradient.views,
+        )
+    elif case == "nonfinite":
+        original_gradient.storage[0] = np.float32(np.nan)
+        bad_gradient = original_gradient
+    elif case == "foreign_views":
+        bad_storage = np.zeros(
+            total_float_count,
+            dtype=np.float32,
+        )
+        bad_gradient = TransformerGradientBuffer(
+            layout=original_gradient.layout,
+            storage=bad_storage,
+            views=original_gradient.views,
+        )
+    else:
+        bad_gradient = TransformerGradientBuffer(
+            layout=run.parameters.layout,
+            storage=run.weights,
+            views=run.parameters.views,
+        )
+
+    results[0] = replace(
+        results[0],
+        gradient=bad_gradient,
+    )
+
+    _assert_failed_transition_preserved_state(
+        run,
+        tuple(results),
+    )
+
+
+def test_reduced_gradient_overflow_fails_without_persistent_commit() -> None:
+    run = _new_run(
+        requested_epochs=0,
+        sequence_count=4,
+    )
+    results = list(_build_zero_results(run))
+    maximum = np.finfo(np.float32).max
+    results[0].gradient.storage[0] = maximum
+    results[1].gradient.storage[0] = maximum
+
+    _assert_failed_transition_preserved_state(
+        run,
+        tuple(results),
+    )
+
+
+def test_adam_candidate_overflow_preserves_last_completed_state() -> None:
+    run = _new_run(requested_epochs=1)
+
+    run.advance_epoch(
+        _build_epoch_results(
+            run,
+            _epoch_reference(0),
+            (0, 1, 2, 3),
+        )
+    )
+    before = _persistent_snapshot(run)
+    results = list(_build_zero_results(run))
+    results[0].gradient.storage[0] = np.finfo(np.float32).max
+
+    with pytest.raises(FloatingPointError):
+        run.advance_epoch(tuple(results))
+
+    assert _persistent_snapshot(run) == before
+    assert run.last_completed_epoch == 0
+    assert run.next_epoch == 1
+    assert tuple(update.epoch for update in run.updates) == (0,)
+    assert run.is_failed
+
+    with pytest.raises(RuntimeError, match="failed"):
+        run.advance_epoch(tuple(results))
+
+
+@pytest.mark.parametrize(
+    "array_name",
+    [
+        "weights",
+        "first_moments",
+        "second_moments",
+    ],
+)
+def test_nonfinite_current_state_rejects_next_epoch_without_commit(
+    array_name: str,
+) -> None:
+    run = _new_run(requested_epochs=1)
+
+    run.advance_epoch(
+        _build_epoch_results(
+            run,
+            _epoch_reference(0),
+            (0, 1, 2, 3),
+        )
+    )
+
+    target = getattr(run, array_name)
+    target[0] = np.float32(np.inf)
+    before = _persistent_snapshot(run)
+
+    with pytest.raises(FloatingPointError):
+        run.advance_epoch(_build_zero_results(run))
+
+    assert _persistent_snapshot(run) == before
+    assert run.last_completed_epoch == 0
+    assert run.next_epoch == 1
+    assert run.is_failed
+
+
+def test_public_negative_zero_is_normalized_to_positive_zero() -> None:
+    run = _new_run(
+        requested_epochs=0,
+        sequence_count=4,
+    )
+    observation = run.advance_epoch(
+        _build_zero_results(
+            run,
+            first_loss=-0.0000004,
+        )
+    )
+
+    assert observation.loss == -0.0000004
+    assert observation.update is not None
+    assert observation.update.loss == 0.0
+    assert math.copysign(1.0, observation.update.loss) == 1.0```
+
+########################################
+Here is my code for backend/tests/test_transformer_worker.py BELOW:
+########################################
+
+```python
+# tests/test_transformer_worker.py
+from __future__ import annotations
+
+import dataclasses
+import math
+import multiprocessing as mp
+import pickle
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import FrozenInstanceError, dataclass, fields
+from multiprocessing.connection import Connection
+from multiprocessing.context import SpawnContext
+from multiprocessing.process import BaseProcess
+from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
+from typing import cast
+
+import numpy as np
+import pytest
+from how_llms_work.ml.math_utils import Mulberry32
+from how_llms_work.ml.transformer import (
+    LogicalTrainingShard,
+    TransformerParameterLayout,
+    TransformerTrainingSequence,
+    build_logical_training_shards,
+    build_transformer_parameter_layout,
+    calculate_logical_training_shard,
+    initialize_transformer_parameters,
+)
+from how_llms_work.ml.transformer_worker import (
+    WORKER_PROTOCOL_VERSION,
+    ComputeMessage,
+    FailureMessage,
+    ReadyMessage,
+    ResultMessage,
+    StopMessage,
+    StoppedMessage,
+    WorkerFailureCode,
+    WorkerFailurePhase,
+    WorkerNumericDType,
+    WorkerProtocolValidationError,
+    WorkerStartupConfig,
+    WorkerState,
+    run_transformer_worker,
+    validate_compute_message,
+    validate_failure_message,
+    validate_ready_message,
+    validate_result_message,
+    validate_stop_message,
+    validate_stopped_message,
+    validate_worker_startup_config,
+)
+
+_PROTOCOL_RECORD_TYPES = (
+    WorkerStartupConfig,
+    ReadyMessage,
+    ComputeMessage,
+    ResultMessage,
+    FailureMessage,
+    StopMessage,
+    StoppedMessage,
+)
+
+_EXPECTED_FIELD_NAMES = {
+    WorkerStartupConfig: (
+        "protocol_version",
+        "worker_index",
+        "num_layers",
+        "dtype_marker",
+        "canonical_float_count",
+        "sequence_count",
+        "weight_shared_memory_name",
+        "assigned_shards",
+        "gradient_shared_memory_names",
+        "training_sequences",
+    ),
+    ReadyMessage: (
+        "protocol_version",
+        "worker_index",
+        "assigned_shard_ids",
+    ),
+    ComputeMessage: (
+        "protocol_version",
+        "worker_index",
+        "epoch",
+        "assigned_shard_ids",
+    ),
+    ResultMessage: (
+        "protocol_version",
+        "worker_index",
+        "epoch",
+        "assigned_shard_ids",
+        "shard_losses",
+    ),
+    FailureMessage: (
+        "protocol_version",
+        "worker_index",
+        "phase",
+        "code",
+        "epoch",
+        "assigned_shard_ids",
+    ),
+    StopMessage: (
+        "protocol_version",
+        "worker_index",
+    ),
+    StoppedMessage: (
+        "protocol_version",
+        "worker_index",
+    ),
+}
+
+
+@dataclass(slots=True)
+class _ParentSharedState:
+    layout: TransformerParameterLayout
+    sequence: TransformerTrainingSequence
+    shard: LogicalTrainingShard
+    weight_shared_memory: SharedMemory
+    assigned_gradient_shared_memory: SharedMemory
+    unassigned_gradient_shared_memory: SharedMemory
+    weight_storage: np.ndarray[
+        tuple[int, ...],
+        np.dtype[np.float32],
+    ]
+    assigned_gradient_storage: np.ndarray[
+        tuple[int, ...],
+        np.dtype[np.float32],
+    ]
+    unassigned_gradient_storage: np.ndarray[
+        tuple[int, ...],
+        np.dtype[np.float32],
+    ]
+    startup_config: WorkerStartupConfig
+
+    def cleanup(self) -> None:
+        self.weight_storage = np.empty(0, dtype=np.float32)
+        self.assigned_gradient_storage = np.empty(
+            0,
+            dtype=np.float32,
+        )
+        self.unassigned_gradient_storage = np.empty(
+            0,
+            dtype=np.float32,
+        )
+
+        errors: list[BaseException] = []
+
+        for shared_memory in (
+            self.weight_shared_memory,
+            self.assigned_gradient_shared_memory,
+            self.unassigned_gradient_shared_memory,
+        ):
+            try:
+                shared_memory.close()
+            except BaseException as exc:
+                errors.append(exc)
+
+            try:
+                shared_memory.unlink()
+            except FileNotFoundError:
+                pass
+            except BaseException as exc:
+                errors.append(exc)
+
+        if errors:
+            raise ExceptionGroup(
+                "Parent shared-memory cleanup failed.",
+                errors,
+            )
+
+
+@dataclass(slots=True)
+class _SpawnedWorker:
+    parent_connection: Connection
+    process: BaseProcess
+
+    def receive(self, timeout: float = 30.0) -> object:
+        assert self.parent_connection.poll(timeout), (
+            f"Worker did not publish a record within {timeout} seconds; "
+            f"alive={self.process.is_alive()} "
+            f"exitcode={self.process.exitcode}."
+        )
+        return self.parent_connection.recv()
+
+    def join(
+        self,
+        expected_exit_code: int,
+        timeout: float = 30.0,
+    ) -> None:
+        self.process.join(timeout)
+
+        assert not self.process.is_alive(), "Worker did not exit within the bounded join timeout."
+        assert self.process.exitcode == expected_exit_code
+
+    def close(self) -> None:
+        try:
+            self.parent_connection.close()
+        finally:
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(10.0)
+
+            self.process.close()
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadyLookalike:
+    protocol_version: int
+    worker_index: int
+    assigned_shard_ids: tuple[int, ...]
+
+
+def _training_sequence(
+    seed: int = 0,
+) -> TransformerTrainingSequence:
+    input_ids = tuple((seed + index) % 32 for index in range(16))
+    target_ids = tuple((seed + index + 1) % 32 for index in range(16))
+
+    return TransformerTrainingSequence(
+        input_ids=input_ids,
+        target_ids=target_ids,
+    )
+
+
+def _sequence_payload(
+    sequence: TransformerTrainingSequence,
+) -> tuple[
+    tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+    ],
+    ...,
+]:
+    return (
+        (
+            sequence.input_ids,
+            sequence.target_ids,
+        ),
+    )
+
+
+def _shard_payload(
+    shard: LogicalTrainingShard,
+) -> tuple[tuple[int, int, int], ...]:
+    return (
+        (
+            shard.shard_index,
+            shard.start_index,
+            shard.stop_index,
+        ),
+    )
+
+
+def _valid_protocol_records() -> tuple[object, ...]:
+    layout = build_transformer_parameter_layout(1)
+    sequence = _training_sequence()
+    shard = build_logical_training_shards(1)[0]
+
+    startup = WorkerStartupConfig(
+        protocol_version=WORKER_PROTOCOL_VERSION,
+        worker_index=0,
+        num_layers=1,
+        dtype_marker=WorkerNumericDType.FLOAT32,
+        canonical_float_count=layout.total_float_count,
+        sequence_count=1,
+        weight_shared_memory_name="weight-name",
+        assigned_shards=_shard_payload(shard),
+        gradient_shared_memory_names=("gradient-name",),
+        training_sequences=_sequence_payload(sequence),
+    )
+
+    return (
+        startup,
+        ReadyMessage(
+            WORKER_PROTOCOL_VERSION,
+            0,
+            (0,),
+        ),
+        ComputeMessage(
+            WORKER_PROTOCOL_VERSION,
+            0,
+            3,
+            (0,),
+        ),
+        ResultMessage(
+            WORKER_PROTOCOL_VERSION,
+            0,
+            3,
+            (0,),
+            (1.25,),
+        ),
+        FailureMessage(
+            WORKER_PROTOCOL_VERSION,
+            0,
+            WorkerFailurePhase.COMPUTE,
+            WorkerFailureCode.NUMERICAL_FAILURE,
+            3,
+            (0,),
+        ),
+        StopMessage(
+            WORKER_PROTOCOL_VERSION,
+            0,
+        ),
+        StoppedMessage(
+            WORKER_PROTOCOL_VERSION,
+            0,
+        ),
+    )
+
+
+def _assert_protocol_value_is_private(value: object) -> None:
+    if value is None or type(value) in {int, float, str}:
+        return
+
+    if isinstance(
+        value,
+        (
+            WorkerNumericDType,
+            WorkerFailurePhase,
+            WorkerFailureCode,
+        ),
+    ):
+        return
+
+    if type(value) is tuple:
+        for item in cast(tuple[object, ...], value):
+            _assert_protocol_value_is_private(item)
+
+        return
+
+    assert not isinstance(
+        value,
+        (
+            list,
+            dict,
+            set,
+            bytearray,
+            memoryview,
+            np.generic,
+            np.ndarray,
+            BaseException,
+            Path,
+        ),
+    )
+
+    pytest.fail("Protocol value uses an unsupported runtime type: " f"{type(value)!r}")
+
+
+def _shared_array(
+    shared_memory: SharedMemory,
+    float_count: int,
+) -> np.ndarray[
+    tuple[int, ...],
+    np.dtype[np.float32],
+]:
+    return np.ndarray(
+        (float_count,),
+        dtype=np.float32,
+        buffer=shared_memory.buf,
+        order="C",
+    )
+
+
+@contextmanager
+def _parent_shared_state(
+    *,
+    assigned_shard_id: int = 0,
+    extra_bytes: int = 0,
+    weight_size_override: int | None = None,
+    gradient_size_override: int | None = None,
+) -> Iterator[_ParentSharedState]:
+    layout = build_transformer_parameter_layout(1)
+    initialized = initialize_transformer_parameters(
+        layout,
+        Mulberry32(42),
+    )
+    sequence = _training_sequence()
+    shard = build_logical_training_shards(1)[assigned_shard_id]
+
+    weight_size = (
+        weight_size_override
+        if weight_size_override is not None
+        else layout.total_byte_count + extra_bytes
+    )
+    gradient_size = (
+        gradient_size_override
+        if gradient_size_override is not None
+        else layout.total_byte_count + extra_bytes
+    )
+
+    weight_shared_memory = SharedMemory(
+        create=True,
+        size=weight_size,
+    )
+    assigned_gradient_shared_memory = SharedMemory(
+        create=True,
+        size=gradient_size,
+    )
+    unassigned_gradient_shared_memory = SharedMemory(
+        create=True,
+        size=layout.total_byte_count + extra_bytes,
+    )
+
+    if weight_size >= layout.total_byte_count:
+        weight_storage = _shared_array(
+            weight_shared_memory,
+            layout.total_float_count,
+        )
+        weight_storage[...] = initialized.storage
+    else:
+        weight_storage = np.empty(
+            0,
+            dtype=np.float32,
+        )
+
+    if gradient_size >= layout.total_byte_count:
+        assigned_gradient_storage = _shared_array(
+            assigned_gradient_shared_memory,
+            layout.total_float_count,
+        )
+        assigned_gradient_storage.fill(np.float32(17.0))
+    else:
+        assigned_gradient_storage = np.empty(
+            0,
+            dtype=np.float32,
+        )
+
+    unassigned_gradient_storage = _shared_array(
+        unassigned_gradient_shared_memory,
+        layout.total_float_count,
+    )
+    unassigned_gradient_storage.fill(np.float32(-23.0))
+
+    if weight_size > layout.total_byte_count:
+        weight_shared_memory.buf[layout.total_byte_count :] = bytes([0xA5]) * (
+            weight_size - layout.total_byte_count
+        )
+
+    if gradient_size > layout.total_byte_count:
+        assigned_gradient_shared_memory.buf[layout.total_byte_count :] = bytes([0x5A]) * (
+            gradient_size - layout.total_byte_count
+        )
+
+    if unassigned_gradient_shared_memory.size > layout.total_byte_count:
+        unassigned_gradient_shared_memory.buf[layout.total_byte_count :] = bytes([0x3C]) * (
+            unassigned_gradient_shared_memory.size - layout.total_byte_count
+        )
+
+    startup_config = WorkerStartupConfig(
+        protocol_version=WORKER_PROTOCOL_VERSION,
+        worker_index=0,
+        num_layers=1,
+        dtype_marker=WorkerNumericDType.FLOAT32,
+        canonical_float_count=layout.total_float_count,
+        sequence_count=1,
+        weight_shared_memory_name=(weight_shared_memory.name),
+        assigned_shards=_shard_payload(shard),
+        gradient_shared_memory_names=(assigned_gradient_shared_memory.name,),
+        training_sequences=_sequence_payload(sequence),
+    )
+
+    state = _ParentSharedState(
+        layout=layout,
+        sequence=sequence,
+        shard=shard,
+        weight_shared_memory=weight_shared_memory,
+        assigned_gradient_shared_memory=(assigned_gradient_shared_memory),
+        unassigned_gradient_shared_memory=(unassigned_gradient_shared_memory),
+        weight_storage=weight_storage,
+        assigned_gradient_storage=(assigned_gradient_storage),
+        unassigned_gradient_storage=(unassigned_gradient_storage),
+        startup_config=startup_config,
+    )
+
+    try:
+        yield state
+    finally:
+        state.cleanup()
+
+
+def _spawn_worker(
+    context: SpawnContext,
+    startup_config: WorkerStartupConfig,
+) -> _SpawnedWorker:
+    parent_connection, child_connection = context.Pipe(duplex=True)
+    process = context.Process(
+        target=run_transformer_worker,
+        args=(
+            child_connection,
+            0,
+            startup_config,
+        ),
+        daemon=False,
+    )
+    process.start()
+    child_connection.close()
+
+    return _SpawnedWorker(
+        parent_connection,
+        process,
+    )
+
+
+def _assert_shared_memory_remains_parent_owned(
+    name: str,
+) -> None:
+    reopened = SharedMemory(
+        name=name,
+        create=False,
+    )
+    reopened.close()
+
+
+def test_protocol_records_have_exact_frozen_slotted_structure() -> None:
+    records = _valid_protocol_records()
+
+    assert WORKER_PROTOCOL_VERSION == 1
+    assert tuple(WorkerNumericDType) == (WorkerNumericDType.FLOAT32,)
+    assert tuple(WorkerState) == (
+        WorkerState.STARTING,
+        WorkerState.READY,
+        WorkerState.COMPUTING,
+        WorkerState.STOPPING,
+        WorkerState.STOPPED,
+    )
+    assert tuple(WorkerFailurePhase) == (
+        WorkerFailurePhase.STARTUP,
+        WorkerFailurePhase.COMMAND,
+        WorkerFailurePhase.COMPUTE,
+        WorkerFailurePhase.SHUTDOWN,
+    )
+    assert tuple(WorkerFailureCode) == (
+        WorkerFailureCode.INVALID_PROTOCOL,
+        WorkerFailureCode.INVALID_LAYOUT,
+        WorkerFailureCode.SHARED_MEMORY,
+        WorkerFailureCode.INVALID_OWNERSHIP,
+        WorkerFailureCode.INVALID_STATE,
+        WorkerFailureCode.NUMERICAL_FAILURE,
+        WorkerFailureCode.COMMUNICATION_FAILURE,
+        WorkerFailureCode.CLEANUP_FAILURE,
+        WorkerFailureCode.INTERNAL_FAILURE,
+    )
+
+    for record_type, record in zip(
+        _PROTOCOL_RECORD_TYPES,
+        records,
+        strict=True,
+    ):
+        assert dataclasses.is_dataclass(record_type)
+        assert (
+            tuple(field.name for field in fields(record_type)) == _EXPECTED_FIELD_NAMES[record_type]
+        )
+        assert not hasattr(record, "__dict__")
+        assert pickle.loads(pickle.dumps(record)) == record
+
+        with pytest.raises(FrozenInstanceError):
+            setattr(
+                record,
+                fields(record_type)[0].name,
+                -1,
+            )
+
+
+def test_protocol_records_contain_only_approved_immutable_values() -> None:
+    for record in _valid_protocol_records():
+        for field in fields(record):
+            _assert_protocol_value_is_private(getattr(record, field.name))
+
+
+def test_worker_side_validators_accept_exact_records() -> None:
+    (
+        startup,
+        ready,
+        compute,
+        result,
+        failure,
+        stop,
+        stopped,
+    ) = _valid_protocol_records()
+
+    assert (
+        validate_worker_startup_config(
+            startup,
+            expected_worker_index=0,
+        )
+        is startup
+    )
+
+    assert (
+        validate_ready_message(
+            ready,
+            expected_worker_index=0,
+            expected_shard_ids=(0,),
+        )
+        is ready
+    )
+
+    assert (
+        validate_compute_message(
+            compute,
+            expected_worker_index=0,
+            expected_shard_ids=(0,),
+        )
+        is compute
+    )
+
+    assert (
+        validate_result_message(
+            result,
+            expected_worker_index=0,
+            expected_epoch=3,
+            expected_shard_ids=(0,),
+        )
+        is result
+    )
+
+    assert (
+        validate_failure_message(
+            failure,
+            expected_worker_index=0,
+            expected_shard_ids=(0,),
+        )
+        is failure
+    )
+
+    assert (
+        validate_stop_message(
+            stop,
+            expected_worker_index=0,
+        )
+        is stop
+    )
+
+    assert (
+        validate_stopped_message(
+            stopped,
+            expected_worker_index=0,
+        )
+        is stopped
+    )
+
+
+@pytest.mark.parametrize(
+    "message, validator",
+    [
+        (
+            _ReadyLookalike(
+                WORKER_PROTOCOL_VERSION,
+                0,
+                (0,),
+            ),
+            lambda value: validate_ready_message(
+                value,
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            ),
+        ),
+        (
+            {
+                "protocol_version": 1,
+                "worker_index": 0,
+                "assigned_shard_ids": (0,),
+            },
+            lambda value: validate_ready_message(
+                value,
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            ),
+        ),
+        (
+            ReadyMessage(
+                2,
+                0,
+                (0,),
+            ),
+            lambda value: validate_ready_message(
+                value,
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            ),
+        ),
+        (
+            ReadyMessage(
+                1,
+                True,
+                (0,),
+            ),
+            lambda value: validate_ready_message(
+                value,
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            ),
+        ),
+        (
+            ComputeMessage(
+                1,
+                0,
+                True,
+                (0,),
+            ),
+            lambda value: validate_compute_message(
+                value,
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            ),
+        ),
+        (
+            ComputeMessage(
+                1,
+                0,
+                0,
+                (1, 0),
+            ),
+            lambda value: validate_compute_message(
+                value,
+                expected_worker_index=0,
+                expected_shard_ids=(0, 1),
+            ),
+        ),
+        (
+            ResultMessage(
+                1,
+                0,
+                4,
+                (0,),
+                (math.nan,),
+            ),
+            lambda value: validate_result_message(
+                value,
+                expected_worker_index=0,
+                expected_epoch=4,
+                expected_shard_ids=(0,),
+            ),
+        ),
+        (
+            ResultMessage(
+                1,
+                0,
+                4,
+                (0,),
+                (1.0, 2.0),
+            ),
+            lambda value: validate_result_message(
+                value,
+                expected_worker_index=0,
+                expected_epoch=4,
+                expected_shard_ids=(0,),
+            ),
+        ),
+        (
+            ResultMessage(
+                1,
+                0,
+                3,
+                (0,),
+                (1.0,),
+            ),
+            lambda value: validate_result_message(
+                value,
+                expected_worker_index=0,
+                expected_epoch=4,
+                expected_shard_ids=(0,),
+            ),
+        ),
+    ],
+)
+def test_protocol_validators_reject_wrong_class_version_types_and_commit_identity(
+    message: object,
+    validator: Callable[[object], object],
+) -> None:
+    with pytest.raises(
+        WorkerProtocolValidationError,
+        match=("^Worker protocol validation failed" "\\.$"),
+    ):
+        validator(message)
+
+
+def test_startup_validation_rejects_wrong_layout_dtype_sequences_and_ownership() -> None:
+    startup = cast(
+        WorkerStartupConfig,
+        _valid_protocol_records()[0],
+    )
+    malformed = (
+        dataclasses.replace(
+            startup,
+            protocol_version=2,
+        ),
+        dataclasses.replace(
+            startup,
+            worker_index=True,
+        ),
+        dataclasses.replace(
+            startup,
+            num_layers=0,
+        ),
+        dataclasses.replace(
+            startup,
+            dtype_marker="float32",
+        ),
+        dataclasses.replace(
+            startup,
+            canonical_float_count=(startup.canonical_float_count + 1),
+        ),
+        dataclasses.replace(
+            startup,
+            sequence_count=2,
+        ),
+        dataclasses.replace(
+            startup,
+            training_sequences=(
+                (
+                    (0,),
+                    (1,),
+                ),
+            ),
+        ),
+        dataclasses.replace(
+            startup,
+            assigned_shards=((0, 0, 0),),
+        ),
+        dataclasses.replace(
+            startup,
+            assigned_shards=(
+                (1, 1, 1),
+                (0, 0, 1),
+            ),
+        ),
+        dataclasses.replace(
+            startup,
+            gradient_shared_memory_names=(),
+        ),
+        dataclasses.replace(
+            startup,
+            gradient_shared_memory_names=(startup.weight_shared_memory_name,),
+        ),
+    )
+
+    for candidate in malformed:
+        with pytest.raises(WorkerProtocolValidationError):
+            validate_worker_startup_config(
+                candidate,
+                expected_worker_index=0,
+            )
+
+
+def test_real_spawn_publishes_one_complete_owned_shard_and_stops_cleanly() -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+
+    with _parent_shared_state(extra_bytes=64) as state:
+        weight_before = state.weight_storage.tobytes(order="C")
+        unassigned_before = state.unassigned_gradient_storage.tobytes(order="C")
+        weight_tail_before = bytes(state.weight_shared_memory.buf[state.layout.total_byte_count :])
+        gradient_tail_before = bytes(
+            state.assigned_gradient_shared_memory.buf[state.layout.total_byte_count :]
+        )
+
+        direct_parameters = initialize_transformer_parameters(
+            state.layout,
+            Mulberry32(42),
+        )
+        direct = calculate_logical_training_shard(
+            (state.sequence,),
+            state.shard,
+            direct_parameters.views,
+        )
+        worker = _spawn_worker(
+            context,
+            state.startup_config,
+        )
+
+        try:
+            ready = validate_ready_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(state.shard.shard_index,),
+            )
+            assert ready.assigned_shard_ids == (state.shard.shard_index,)
+
+            worker.parent_connection.send(
+                ComputeMessage(
+                    WORKER_PROTOCOL_VERSION,
+                    0,
+                    7,
+                    ready.assigned_shard_ids,
+                )
+            )
+            result = validate_result_message(
+                worker.receive(60.0),
+                expected_worker_index=0,
+                expected_epoch=7,
+                expected_shard_ids=(ready.assigned_shard_ids),
+            )
+
+            assert result.shard_losses == (direct.loss,)
+            np.testing.assert_array_equal(
+                state.assigned_gradient_storage,
+                direct.gradient.storage,
+            )
+            assert state.weight_storage.tobytes(order="C") == weight_before
+            assert state.unassigned_gradient_storage.tobytes(order="C") == unassigned_before
+            assert (
+                bytes(state.weight_shared_memory.buf[state.layout.total_byte_count :])
+                == weight_tail_before
+            )
+            assert (
+                bytes(state.assigned_gradient_shared_memory.buf[state.layout.total_byte_count :])
+                == gradient_tail_before
+            )
+
+            worker.parent_connection.send(
+                StopMessage(
+                    WORKER_PROTOCOL_VERSION,
+                    0,
+                )
+            )
+            validate_stopped_message(
+                worker.receive(),
+                expected_worker_index=0,
+            )
+            worker.join(0)
+
+            _assert_shared_memory_remains_parent_owned(state.weight_shared_memory.name)
+            _assert_shared_memory_remains_parent_owned(state.assigned_gradient_shared_memory.name)
+        finally:
+            worker.close()
+
+
+def test_real_spawn_preserves_exact_empty_shard_behavior() -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+
+    with _parent_shared_state(assigned_shard_id=1) as state:
+        worker = _spawn_worker(
+            context,
+            state.startup_config,
+        )
+
+        try:
+            validate_ready_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(1,),
+            )
+            worker.parent_connection.send(
+                ComputeMessage(
+                    WORKER_PROTOCOL_VERSION,
+                    0,
+                    0,
+                    (1,),
+                )
+            )
+            result = validate_result_message(
+                worker.receive(60.0),
+                expected_worker_index=0,
+                expected_epoch=0,
+                expected_shard_ids=(1,),
+            )
+
+            assert result.shard_losses == (0.0,)
+            np.testing.assert_array_equal(
+                state.assigned_gradient_storage,
+                np.zeros(
+                    state.layout.total_float_count,
+                    dtype=np.float32,
+                ),
+            )
+
+            worker.parent_connection.send(
+                StopMessage(
+                    WORKER_PROTOCOL_VERSION,
+                    0,
+                )
+            )
+            validate_stopped_message(
+                worker.receive(),
+                expected_worker_index=0,
+            )
+            worker.join(0)
+        finally:
+            worker.close()
+
+
+@pytest.mark.parametrize(
+    "capacity_target",
+    [
+        "weight",
+        "gradient",
+    ],
+)
+def test_real_spawn_rejects_undersized_shared_memory_without_unlinking(
+    capacity_target: str,
+) -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+    layout = build_transformer_parameter_layout(1)
+    undersized = max(
+        1,
+        layout.total_byte_count // 2,
+    )
+    overrides = {
+        "weight_size_override": (undersized if capacity_target == "weight" else None),
+        "gradient_size_override": (undersized if capacity_target == "gradient" else None),
+    }
+
+    with _parent_shared_state(**overrides) as state:
+        worker = _spawn_worker(
+            context,
+            state.startup_config,
+        )
+
+        try:
+            failure = validate_failure_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            )
+            assert failure.phase is WorkerFailurePhase.STARTUP
+            assert failure.code is WorkerFailureCode.SHARED_MEMORY
+            assert failure.epoch is None
+            worker.join(1)
+
+            _assert_shared_memory_remains_parent_owned(state.weight_shared_memory.name)
+            _assert_shared_memory_remains_parent_owned(state.assigned_gradient_shared_memory.name)
+        finally:
+            worker.close()
+
+
+@pytest.mark.parametrize(
+    "case_name",
+    [
+        "unsupported-layer",
+        "wrong-dtype",
+        "duplicate-shard",
+        "missing-gradient-name",
+        "weight-name-reused-as-gradient",
+    ],
+)
+def test_real_spawn_rejects_invalid_startup_protocol_variants(
+    case_name: str,
+) -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+
+    with _parent_shared_state() as state:
+        shard_zero = build_logical_training_shards(1)[0]
+        config = state.startup_config
+        expected_code = WorkerFailureCode.INVALID_PROTOCOL
+
+        if case_name == "unsupported-layer":
+            config = dataclasses.replace(
+                config,
+                num_layers=0,
+            )
+            expected_code = WorkerFailureCode.INVALID_LAYOUT
+        elif case_name == "wrong-dtype":
+            config = dataclasses.replace(
+                config,
+                dtype_marker="float32",
+            )
+            expected_code = WorkerFailureCode.INVALID_LAYOUT
+        elif case_name == "duplicate-shard":
+            expected_code = WorkerFailureCode.INVALID_OWNERSHIP
+            shard_descriptor = (
+                shard_zero.shard_index,
+                shard_zero.start_index,
+                shard_zero.stop_index,
+            )
+            config = dataclasses.replace(
+                config,
+                assigned_shards=(
+                    shard_descriptor,
+                    shard_descriptor,
+                ),
+                gradient_shared_memory_names=(
+                    state.assigned_gradient_shared_memory.name,
+                    state.unassigned_gradient_shared_memory.name,
+                ),
+            )
+        elif case_name == "missing-gradient-name":
+            config = dataclasses.replace(
+                config,
+                gradient_shared_memory_names=(),
+            )
+            expected_code = WorkerFailureCode.INVALID_OWNERSHIP
+        elif case_name == "weight-name-reused-as-gradient":
+            config = dataclasses.replace(
+                config,
+                gradient_shared_memory_names=(state.weight_shared_memory.name,),
+            )
+            expected_code = WorkerFailureCode.INVALID_OWNERSHIP
+        else:
+            pytest.fail(f"Unhandled startup case: {case_name}")
+
+        worker = _spawn_worker(
+            context,
+            config,
+        )
+
+        try:
+            failure = validate_failure_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(),
+            )
+            assert failure.phase is WorkerFailurePhase.STARTUP
+            assert failure.code is expected_code
+            assert failure.epoch is None
+            assert state.weight_shared_memory.name not in repr(failure)
+            assert state.assigned_gradient_shared_memory.name not in repr(failure)
+            worker.join(1)
+
+            _assert_shared_memory_remains_parent_owned(state.weight_shared_memory.name)
+            _assert_shared_memory_remains_parent_owned(state.assigned_gradient_shared_memory.name)
+        finally:
+            worker.close()
+
+
+@pytest.mark.parametrize(
+    "malformed_command",
+    [
+        {
+            "protocol_version": 1,
+            "worker_index": 0,
+        },
+        ReadyMessage(
+            1,
+            0,
+            (0,),
+        ),
+        ComputeMessage(
+            2,
+            0,
+            0,
+            (0,),
+        ),
+        ComputeMessage(
+            1,
+            1,
+            0,
+            (0,),
+        ),
+    ],
+)
+def test_real_spawn_rejects_malformed_or_illegal_parent_commands(
+    malformed_command: object,
+) -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+
+    with _parent_shared_state() as state:
+        gradient_before = state.assigned_gradient_storage.tobytes(order="C")
+        worker = _spawn_worker(
+            context,
+            state.startup_config,
+        )
+
+        try:
+            validate_ready_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            )
+            worker.parent_connection.send(malformed_command)
+            failure = validate_failure_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            )
+            assert failure.phase is WorkerFailurePhase.COMMAND
+            assert failure.code is WorkerFailureCode.INVALID_PROTOCOL
+            assert failure.epoch is None
+            assert state.assigned_gradient_storage.tobytes(order="C") == gradient_before
+            worker.join(1)
+        finally:
+            worker.close()
+
+
+def test_real_spawn_rejects_second_outstanding_compute_without_commit_marker() -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+
+    with _parent_shared_state() as state:
+        weight_before = state.weight_storage.tobytes(order="C")
+        unassigned_before = state.unassigned_gradient_storage.tobytes(order="C")
+        worker = _spawn_worker(
+            context,
+            state.startup_config,
+        )
+
+        try:
+            validate_ready_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            )
+            worker.parent_connection.send(
+                ComputeMessage(
+                    1,
+                    0,
+                    0,
+                    (0,),
+                )
+            )
+            worker.parent_connection.send(
+                ComputeMessage(
+                    1,
+                    0,
+                    1,
+                    (0,),
+                )
+            )
+
+            message = worker.receive(60.0)
+            assert type(message) is FailureMessage
+            failure = validate_failure_message(
+                message,
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            )
+            assert failure.phase is WorkerFailurePhase.COMMAND
+            assert failure.code is WorkerFailureCode.INVALID_STATE
+            assert failure.epoch == 0
+            assert state.weight_storage.tobytes(order="C") == weight_before
+            assert state.unassigned_gradient_storage.tobytes(order="C") == unassigned_before
+            worker.join(1)
+        finally:
+            worker.close()
+
+
+def test_real_spawn_rejects_nonfinite_weights_after_ready_and_sends_no_result() -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+
+    with _parent_shared_state() as state:
+        unassigned_before = state.unassigned_gradient_storage.tobytes(order="C")
+        worker = _spawn_worker(
+            context,
+            state.startup_config,
+        )
+
+        try:
+            validate_ready_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            )
+            state.weight_storage[0] = np.float32(np.nan)
+            worker.parent_connection.send(
+                ComputeMessage(
+                    1,
+                    0,
+                    5,
+                    (0,),
+                )
+            )
+            failure = validate_failure_message(
+                worker.receive(60.0),
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            )
+            assert failure.phase is WorkerFailurePhase.COMPUTE
+            assert failure.code is WorkerFailureCode.NUMERICAL_FAILURE
+            assert failure.epoch == 5
+
+            np.testing.assert_array_equal(
+                state.assigned_gradient_storage,
+                np.zeros(
+                    state.layout.total_float_count,
+                    dtype=np.float32,
+                ),
+            )
+            assert state.unassigned_gradient_storage.tobytes(order="C") == unassigned_before
+            worker.join(1)
+        finally:
+            worker.close()
+
+
+def test_real_spawn_accepts_stop_before_compute() -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+
+    with _parent_shared_state() as state:
+        gradient_before = state.assigned_gradient_storage.tobytes(order="C")
+        worker = _spawn_worker(
+            context,
+            state.startup_config,
+        )
+
+        try:
+            validate_ready_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            )
+            worker.parent_connection.send(
+                StopMessage(
+                    1,
+                    0,
+                )
+            )
+            validate_stopped_message(
+                worker.receive(),
+                expected_worker_index=0,
+            )
+            worker.join(0)
+
+            assert state.assigned_gradient_storage.tobytes(order="C") == gradient_before
+        finally:
+            worker.close()
+
+
+def test_real_spawn_accepts_two_serial_compute_commands() -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+
+    with _parent_shared_state() as state:
+        worker = _spawn_worker(
+            context,
+            state.startup_config,
+        )
+
+        try:
+            validate_ready_message(
+                worker.receive(),
+                expected_worker_index=0,
+                expected_shard_ids=(0,),
+            )
+
+            results: list[ResultMessage] = []
+
+            for epoch in (0, 1):
+                worker.parent_connection.send(
+                    ComputeMessage(
+                        1,
+                        0,
+                        epoch,
+                        (0,),
+                    )
+                )
+                results.append(
+                    validate_result_message(
+                        worker.receive(60.0),
+                        expected_worker_index=0,
+                        expected_epoch=epoch,
+                        expected_shard_ids=(0,),
+                    )
+                )
+
+            assert results[0].shard_losses == results[1].shard_losses
+
+            worker.parent_connection.send(
+                StopMessage(
+                    1,
+                    0,
+                )
+            )
+            validate_stopped_message(
+                worker.receive(),
+                expected_worker_index=0,
+            )
+            worker.join(0)
+        finally:
+            worker.close()
+
+
+def test_repeated_real_spawn_workers_do_not_reuse_process_state() -> None:
+    context = cast(
+        SpawnContext,
+        mp.get_context("spawn"),
+    )
+
+    for epoch in (11, 12):
+        with _parent_shared_state() as state:
+            worker = _spawn_worker(
+                context,
+                state.startup_config,
+            )
+
+            try:
+                validate_ready_message(
+                    worker.receive(),
+                    expected_worker_index=0,
+                    expected_shard_ids=(0,),
+                )
+                worker.parent_connection.send(
+                    ComputeMessage(
+                        1,
+                        0,
+                        epoch,
+                        (0,),
+                    )
+                )
+                result = validate_result_message(
+                    worker.receive(60.0),
+                    expected_worker_index=0,
+                    expected_epoch=epoch,
+                    expected_shard_ids=(0,),
+                )
+                assert result.epoch == epoch
+                assert not worker.parent_connection.poll()
+
+                worker.parent_connection.send(
+                    StopMessage(
+                        1,
+                        0,
+                    )
+                )
+                validate_stopped_message(
+                    worker.receive(),
+                    expected_worker_index=0,
+                )
+                worker.join(0)
+            finally:
+                worker.close()```
+
+########################################
+Here is my code for backend/tests/test_transformer_worker_group.py BELOW:
+########################################
+
+```python
+# tests/test_transformer_worker_group.py
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import inspect
+from collections.abc import Awaitable, Callable
+from dataclasses import FrozenInstanceError, fields
+from multiprocessing.connection import Connection
+from multiprocessing.context import BaseContext
+from multiprocessing.process import BaseProcess
+from multiprocessing.shared_memory import SharedMemory
+from threading import get_ident
+from time import sleep
+from typing import cast
+
+import numpy as np
+import numpy.typing as npt
+import pytest
+from how_llms_work.ml import transformer_worker as transformer_worker_module
+from how_llms_work.ml.transformer import (
+    LogicalTrainingShard,
+    LogicalTrainingShardResult,
+    TransformerTrainingSequence,
+    build_logical_training_shards,
+    build_transformer_parameter_layout,
+    build_transformer_parameter_views,
+    calculate_logical_training_shard,
+    create_transformer_gradient_buffer,
+)
+from how_llms_work.ml.transformer_worker import (
+    RequestScopedWorkerGroup,
+    RequestScopedWorkerGroupCleanupFailureCode,
+    RequestScopedWorkerGroupCleanupReport,
+    RequestScopedWorkerGroupError,
+    RequestScopedWorkerGroupFailureCode,
+    RequestScopedWorkerGroupState,
+    build_worker_shard_assignments,
+    calculate_actual_worker_count,
+    create_request_scoped_worker_group,
+)
+
+_Float32Array = npt.NDArray[np.float32]
+_PollObserver = Callable[[], Awaitable[None]]
+
+
+_EXPECTED_PUBLIC_SYMBOLS = (
+    "WORKER_PROTOCOL_VERSION",
+    "WorkerNumericDType",
+    "WorkerState",
+    "RequestScopedWorkerGroupState",
+    "RequestScopedWorkerGroupFailureCode",
+    "RequestScopedWorkerGroupCleanupFailureCode",
+    "RequestScopedWorkerGroupCleanupReport",
+    "RequestScopedWorkerGroupError",
+    "calculate_actual_worker_count",
+    "build_worker_shard_assignments",
+    "RequestScopedWorkerGroup",
+    "create_request_scoped_worker_group",
+    "WorkerFailurePhase",
+    "WorkerFailureCode",
+    "WorkerStartupConfig",
+    "ReadyMessage",
+    "ComputeMessage",
+    "ResultMessage",
+    "FailureMessage",
+    "StopMessage",
+    "StoppedMessage",
+    "WorkerProtocolValidationError",
+    "validate_worker_startup_config",
+    "validate_ready_message",
+    "validate_compute_message",
+    "validate_result_message",
+    "validate_failure_message",
+    "validate_stop_message",
+    "validate_stopped_message",
+    "run_transformer_worker",
+)
+
+
+def _clean_report() -> RequestScopedWorkerGroupCleanupReport:
+    return RequestScopedWorkerGroupCleanupReport(
+        cooperative_shutdown_completed=True,
+        terminate_required=False,
+        kill_required=False,
+        process_exit_codes=(),
+        secondary_failures=(),
+    )
+
+
+def _group_inputs() -> tuple[
+    int,
+    _Float32Array,
+    tuple[TransformerTrainingSequence, ...],
+    tuple[LogicalTrainingShard, ...],
+]:
+    num_layers = 1
+    layout = build_transformer_parameter_layout(num_layers)
+    weights = np.zeros(
+        layout.total_float_count,
+        dtype=np.float32,
+        order="C",
+    )
+    sequence = TransformerTrainingSequence(
+        input_ids=tuple(range(16)),
+        target_ids=tuple(range(1, 17)),
+    )
+    sequences = (sequence,)
+    shards = build_logical_training_shards(len(sequences))
+    return num_layers, weights, sequences, shards
+
+
+def _direct_shard_results(
+    num_layers: int,
+    weights: _Float32Array,
+    sequences: tuple[TransformerTrainingSequence, ...],
+    shards: tuple[LogicalTrainingShard, ...],
+) -> tuple[LogicalTrainingShardResult, ...]:
+    layout = build_transformer_parameter_layout(num_layers)
+    parameters = build_transformer_parameter_views(
+        weights,
+        layout,
+    )
+    return tuple(
+        calculate_logical_training_shard(
+            sequences,
+            shard,
+            parameters,
+        )
+        for shard in shards
+    )
+
+
+def _assert_shard_results_match(
+    actual_results: tuple[LogicalTrainingShardResult, ...],
+    expected_results: tuple[LogicalTrainingShardResult, ...],
+) -> None:
+    assert tuple(result.shard.shard_index for result in actual_results) == (0, 1, 2, 3)
+    assert len(actual_results) == len(expected_results)
+
+    for actual, expected in zip(
+        actual_results,
+        expected_results,
+        strict=True,
+    ):
+        assert actual.shard == expected.shard
+        assert actual.processed_sequence_count == expected.processed_sequence_count
+        assert actual.loss == pytest.approx(
+            expected.loss,
+            rel=1e-6,
+            abs=1e-6,
+        )
+        np.testing.assert_allclose(
+            actual.gradient.storage,
+            expected.gradient.storage,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+
+def _shard_results(
+    shards: tuple[LogicalTrainingShard, ...],
+) -> tuple[LogicalTrainingShardResult, ...]:
+    layout = build_transformer_parameter_layout(1)
+    results: list[LogicalTrainingShardResult] = []
+
+    for shard in shards:
+        gradient = create_transformer_gradient_buffer(layout)
+        gradient.storage.fill(np.float32(shard.shard_index + 1))
+        results.append(
+            LogicalTrainingShardResult(
+                shard=shard,
+                processed_sequence_count=shard.stop_index - shard.start_index,
+                loss=float(shard.shard_index),
+                gradient=gradient,
+            )
+        )
+
+    return tuple(results)
+
+
+async def _observe_poll() -> None:
+    return None
+
+
+class _SequenceClock:
+    def __init__(self, values: tuple[float, ...]) -> None:
+        self._values = values
+        self._index = 0
+
+    def __call__(self) -> float:
+        if self._index >= len(self._values):
+            return self._values[-1]
+
+        value = self._values[self._index]
+        self._index += 1
+        return value
+
+
+class _DelegatingWaitSpy:
+    def __init__(self) -> None:
+        self.calls: list[tuple[float | None, int]] = []
+
+    def __call__(
+        self,
+        waitables: tuple[
+            transformer_worker_module._WorkerWaitable,
+            ...,
+        ],
+        timeout: float | None,
+    ) -> list[transformer_worker_module._WorkerWaitable]:
+        self.calls.append((timeout, get_ident()))
+        return transformer_worker_module._wait_for_worker_connections(
+            waitables,
+            timeout,
+        )
+
+
+class _CompletionOrderWaiter:
+    def __init__(
+        self,
+        completion_order: tuple[int, ...],
+    ) -> None:
+        self._completion_order = completion_order
+        self._ready_connection_indexes: set[int] = set()
+        self.returned_connection_orders: list[tuple[int, ...]] = []
+
+    def __call__(
+        self,
+        waitables: tuple[
+            transformer_worker_module._WorkerWaitable,
+            ...,
+        ],
+        timeout: float | None,
+    ) -> list[transformer_worker_module._WorkerWaitable]:
+        ready_objects = transformer_worker_module._wait_for_worker_connections(
+            waitables,
+            timeout,
+        )
+        connections = tuple(waitable for waitable in waitables if not isinstance(waitable, int))
+
+        if len(connections) != len(self._completion_order):
+            return ready_objects
+
+        ready_sentinels = [
+            ready_object for ready_object in ready_objects if isinstance(ready_object, int)
+        ]
+
+        if ready_sentinels:
+            return ready_sentinels
+
+        for ready_object in ready_objects:
+            for connection_index, connection in enumerate(connections):
+                if ready_object is connection:
+                    self._ready_connection_indexes.add(connection_index)
+                    break
+
+        if len(self._ready_connection_indexes) != len(connections):
+            return []
+
+        self._ready_connection_indexes.clear()
+        self.returned_connection_orders.append(self._completion_order)
+        return [connections[connection_index] for connection_index in self._completion_order]
+
+
+def _assigned_shard_ids_from_startup_config(
+    startup_config: object,
+    expected_worker_index: int,
+) -> tuple[int, ...]:
+    config = transformer_worker_module.validate_worker_startup_config(
+        startup_config,
+        expected_worker_index=expected_worker_index,
+    )
+    return tuple(shard[0] for shard in config.assigned_shards)
+
+
+def _controlled_malformed_ready_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    del expected_worker_index, startup_config
+
+    try:
+        connection.send(("ready",))
+    finally:
+        connection.close()
+
+
+def _controlled_failure_ready_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.FailureMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                phase=transformer_worker_module.WorkerFailurePhase.STARTUP,
+                code=transformer_worker_module.WorkerFailureCode.INTERNAL_FAILURE,
+                epoch=None,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+    finally:
+        connection.close()
+
+
+def _controlled_wrong_ready_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION + 1),
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+    finally:
+        connection.close()
+
+
+def _controlled_exit_before_ready_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    del expected_worker_index, startup_config
+    connection.close()
+
+
+def _controlled_missing_ready_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    del expected_worker_index, startup_config
+
+    try:
+        sleep(0.05)
+    finally:
+        connection.close()
+
+
+def _controlled_late_ready_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        sleep(0.05)
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+def _controlled_slow_ready_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        sleep(0.25)
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION),
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        raw_message = connection.recv()
+        transformer_worker_module.validate_stop_message(
+            raw_message,
+            expected_worker_index=expected_worker_index,
+        )
+        connection.send(
+            transformer_worker_module.StoppedMessage(
+                protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION),
+                worker_index=expected_worker_index,
+            )
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+def _controlled_slow_shutdown_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION),
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        raw_message = connection.recv()
+        transformer_worker_module.validate_stop_message(
+            raw_message,
+            expected_worker_index=expected_worker_index,
+        )
+        sleep(0.4)
+        connection.send(
+            transformer_worker_module.StoppedMessage(
+                protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION),
+                worker_index=expected_worker_index,
+            )
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+def _controlled_never_ready_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    del expected_worker_index, startup_config
+
+    try:
+        sleep(0.4)
+    finally:
+        connection.close()
+
+
+def _controlled_duplicate_ready_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+    ready = transformer_worker_module.ReadyMessage(
+        protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+        worker_index=expected_worker_index,
+        assigned_shard_ids=assigned_shard_ids,
+    )
+
+    try:
+        if expected_worker_index == 0:
+            connection.send(ready)
+            connection.send(ready)
+
+        sleep(0.2)
+    finally:
+        connection.close()
+
+
+def _complete_controlled_worker_shutdown(
+    connection: Connection,
+    expected_worker_index: int,
+) -> None:
+    raw_message = connection.recv()
+    transformer_worker_module.validate_stop_message(
+        raw_message,
+        expected_worker_index=expected_worker_index,
+    )
+    connection.send(
+        transformer_worker_module.StoppedMessage(
+            protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+            worker_index=expected_worker_index,
+        )
+    )
+
+
+def _controlled_wrong_epoch_result_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        command = transformer_worker_module.validate_compute_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+            expected_shard_ids=assigned_shard_ids,
+        )
+        connection.send(
+            transformer_worker_module.ResultMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                epoch=command.epoch + 1,
+                assigned_shard_ids=assigned_shard_ids,
+                shard_losses=(0.0,) * len(assigned_shard_ids),
+            )
+        )
+        _complete_controlled_worker_shutdown(
+            connection,
+            expected_worker_index,
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+def _controlled_failure_epoch_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        command = transformer_worker_module.validate_compute_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+            expected_shard_ids=assigned_shard_ids,
+        )
+        connection.send(
+            transformer_worker_module.FailureMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                phase=transformer_worker_module.WorkerFailurePhase.COMPUTE,
+                code=transformer_worker_module.WorkerFailureCode.INTERNAL_FAILURE,
+                epoch=command.epoch,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        _complete_controlled_worker_shutdown(
+            connection,
+            expected_worker_index,
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+def _controlled_malformed_epoch_result_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        transformer_worker_module.validate_compute_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+            expected_shard_ids=assigned_shard_ids,
+        )
+        connection.send(("result",))
+        _complete_controlled_worker_shutdown(
+            connection,
+            expected_worker_index,
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+def _controlled_duplicate_epoch_result_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        command = transformer_worker_module.validate_compute_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+            expected_shard_ids=assigned_shard_ids,
+        )
+
+        if expected_worker_index == 0:
+            result = transformer_worker_module.ResultMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                epoch=command.epoch,
+                assigned_shard_ids=assigned_shard_ids,
+                shard_losses=(0.0,) * len(assigned_shard_ids),
+            )
+            connection.send(result)
+            connection.send(result)
+
+        _complete_controlled_worker_shutdown(
+            connection,
+            expected_worker_index,
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+def _controlled_exit_during_epoch_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        transformer_worker_module.validate_compute_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+            expected_shard_ids=assigned_shard_ids,
+        )
+    finally:
+        connection.close()
+
+
+def _controlled_never_result_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        transformer_worker_module.validate_compute_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+            expected_shard_ids=assigned_shard_ids,
+        )
+        _complete_controlled_worker_shutdown(
+            connection,
+            expected_worker_index,
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+def _controlled_partial_commit_with_nonfinite_gradient_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    config = transformer_worker_module.validate_worker_startup_config(
+        startup_config,
+        expected_worker_index=expected_worker_index,
+    )
+    assigned_shard_ids = tuple(shard[0] for shard in config.assigned_shards)
+    gradient_shared_memory: SharedMemory | None = None
+    gradient_buffer: memoryview | None = None
+    gradient_storage: _Float32Array | None = None
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=transformer_worker_module.WORKER_PROTOCOL_VERSION,
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        command = transformer_worker_module.validate_compute_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+            expected_shard_ids=assigned_shard_ids,
+        )
+
+        if expected_worker_index == 0:
+            gradient_shared_memory = SharedMemory(
+                name=config.gradient_shared_memory_names[0],
+                create=False,
+            )
+            canonical_byte_count = config.canonical_float_count * np.dtype(np.float32).itemsize
+            gradient_buffer = gradient_shared_memory.buf[:canonical_byte_count]
+            gradient_storage = np.ndarray(
+                (config.canonical_float_count,),
+                dtype=np.float32,
+                buffer=gradient_buffer,
+                order="C",
+            )
+            gradient_storage[0] = np.float32(np.nan)
+            connection.send(
+                transformer_worker_module.ResultMessage(
+                    protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION),
+                    worker_index=expected_worker_index,
+                    epoch=command.epoch,
+                    assigned_shard_ids=assigned_shard_ids,
+                    shard_losses=(0.0,) * len(assigned_shard_ids),
+                )
+            )
+
+        _complete_controlled_worker_shutdown(
+            connection,
+            expected_worker_index,
+        )
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        gradient_storage = None
+
+        if gradient_buffer is not None:
+            gradient_buffer.release()
+
+        if gradient_shared_memory is not None:
+            gradient_shared_memory.close()
+
+        connection.close()
+
+
+def _controlled_exit_without_stopped_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION),
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        transformer_worker_module.validate_stop_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+        )
+    finally:
+        connection.close()
+
+
+def _controlled_ignore_stop_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION),
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        transformer_worker_module.validate_stop_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+        )
+        sleep(5.0)
+    finally:
+        connection.close()
+
+
+def _controlled_stopped_nonzero_exit_worker(
+    connection: Connection,
+    expected_worker_index: int,
+    startup_config: object,
+) -> None:
+    assigned_shard_ids = _assigned_shard_ids_from_startup_config(
+        startup_config,
+        expected_worker_index,
+    )
+
+    try:
+        connection.send(
+            transformer_worker_module.ReadyMessage(
+                protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION),
+                worker_index=expected_worker_index,
+                assigned_shard_ids=assigned_shard_ids,
+            )
+        )
+        transformer_worker_module.validate_stop_message(
+            connection.recv(),
+            expected_worker_index=expected_worker_index,
+        )
+        connection.send(
+            transformer_worker_module.StoppedMessage(
+                protocol_version=(transformer_worker_module.WORKER_PROTOCOL_VERSION),
+                worker_index=expected_worker_index,
+            )
+        )
+    finally:
+        connection.close()
+
+    raise SystemExit(3)
+
+
+class _StartFailingProcess:
+    daemon = False
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def start(self) -> None:
+        raise OSError("controlled process-start failure")
+
+    def is_alive(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _TrackedSharedMemory:
+    def __init__(self, handle: SharedMemory) -> None:
+        self._handle = handle
+        self.close_calls = 0
+        self.unlink_calls = 0
+
+    @property
+    def name(self) -> str:
+        return self._handle.name
+
+    @property
+    def size(self) -> int:
+        return self._handle.size
+
+    @property
+    def buf(self) -> memoryview:
+        return self._handle.buf
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self._handle.close()
+
+    def unlink(self) -> None:
+        self.unlink_calls += 1
+        self._handle.unlink()
+
+
+@pytest.mark.parametrize("actual_worker_count", (1, 2, 3, 4))
+@pytest.mark.asyncio
+async def test_real_spawn_group_requires_one_ready_record_from_every_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    actual_worker_count: int,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: actual_worker_count,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime()
+
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    snapshot = runtime.startup_snapshot()
+
+    assert group.state is RequestScopedWorkerGroupState.READY
+    assert snapshot.worker_count == actual_worker_count
+    assert snapshot.started_worker_count == actual_worker_count
+    assert snapshot.ready_worker_count == actual_worker_count
+    assert snapshot.non_daemonic == (True,) * actual_worker_count
+    assert snapshot.child_endpoints_closed == (True,) * actual_worker_count
+    assert snapshot.alive == (True,) * actual_worker_count
+
+    report = await group.cleanup()
+
+    assert report.successful
+    assert report.process_exit_codes == (0,) * actual_worker_count
+    assert runtime.startup_snapshot().alive == (False,) * actual_worker_count
+
+
+@pytest.mark.asyncio
+async def test_process_start_failure_closes_partial_worker_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    failing_process = _StartFailingProcess()
+
+    def process_factory(
+        context: BaseContext,
+        target: transformer_worker_module._WorkerProcessTarget,
+        child_connection: Connection,
+        worker_index: int,
+        startup_config: object,
+    ) -> BaseProcess:
+        del context, target, child_connection, worker_index, startup_config
+        return cast(BaseProcess, failing_process)
+
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _process_factory=cast(
+            transformer_worker_module._WorkerProcessFactory,
+            process_factory,
+        ),
+    )
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=_observe_poll,
+            _runtime=runtime,
+        )
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE
+    assert raised.value.cleanup_report is not None
+    assert failing_process.close_calls == 1
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().child_endpoints_closed == (True,)
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.asyncio
+async def test_startup_rejects_duplicate_ready_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 2,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_duplicate_ready_worker,
+    )
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=_observe_poll,
+            _runtime=runtime,
+        )
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE
+    assert raised.value.cleanup_report is not None
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False, False)
+
+
+@pytest.mark.parametrize(
+    "worker_target",
+    (
+        _controlled_malformed_ready_worker,
+        _controlled_failure_ready_worker,
+        _controlled_wrong_ready_worker,
+        _controlled_exit_before_ready_worker,
+    ),
+)
+@pytest.mark.asyncio
+async def test_startup_rejects_malformed_failed_wrong_or_exited_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_target: Callable[[Connection, int, object], None],
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=cast(
+            transformer_worker_module._WorkerProcessTarget,
+            worker_target,
+        ),
+    )
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=_observe_poll,
+            _runtime=runtime,
+        )
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE
+    assert raised.value.cleanup_report is not None
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.parametrize(
+    "worker_target",
+    (
+        _controlled_missing_ready_worker,
+        _controlled_late_ready_worker,
+    ),
+)
+@pytest.mark.asyncio
+async def test_startup_uses_one_absolute_deadline_for_missing_or_late_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_target: Callable[[Connection, int, object], None],
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=cast(
+            transformer_worker_module._WorkerProcessTarget,
+            worker_target,
+        ),
+        _monotonic_clock=_SequenceClock((100.0, 131.0)),
+    )
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=_observe_poll,
+            _runtime=runtime,
+        )
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.TIMEOUT
+    assert raised.value.cleanup_report is not None
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.asyncio
+async def test_startup_waits_off_event_loop_and_observes_after_every_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    event_loop_thread_id = get_ident()
+    wait_spy = _DelegatingWaitSpy()
+    observer_thread_ids: list[int] = []
+    heartbeat_count = 0
+    heartbeat_running = True
+
+    async def observe_poll() -> None:
+        observer_thread_ids.append(get_ident())
+
+    async def heartbeat() -> None:
+        nonlocal heartbeat_count
+
+        while heartbeat_running:
+            heartbeat_count += 1
+            await asyncio.sleep(0)
+
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_slow_ready_worker,
+        _connection_waiter=wait_spy,
+    )
+    heartbeat_task = asyncio.create_task(heartbeat())
+
+    try:
+        group = await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=observe_poll,
+            _runtime=runtime,
+        )
+    finally:
+        heartbeat_running = False
+        await heartbeat_task
+
+    startup_wait_calls = tuple(wait_spy.calls)
+
+    assert len(startup_wait_calls) >= 2
+    assert all(
+        timeout is not None
+        and 0.0 < timeout <= transformer_worker_module._WORKER_GROUP_POLL_TIMEOUT_SECONDS
+        for timeout, _ in startup_wait_calls
+    )
+    assert all(thread_id != event_loop_thread_id for _, thread_id in startup_wait_calls)
+    assert observer_thread_ids == ([event_loop_thread_id] * len(startup_wait_calls))
+    assert heartbeat_count > 0
+
+    report = await group.cleanup()
+
+    assert report.successful
+
+
+@pytest.mark.asyncio
+async def test_startup_timeout_uses_repeated_bounded_polls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    wait_spy = _DelegatingWaitSpy()
+    observer_calls = 0
+
+    async def observe_poll() -> None:
+        nonlocal observer_calls
+        observer_calls += 1
+
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_never_ready_worker,
+        _connection_waiter=wait_spy,
+        _startup_timeout_seconds=0.21,
+    )
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=observe_poll,
+            _runtime=runtime,
+        )
+
+    observed_wait_calls = tuple(wait_spy.calls)
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.TIMEOUT
+    assert raised.value.cleanup_report is not None
+    assert len(observed_wait_calls) >= 2
+    assert observer_calls == len(observed_wait_calls)
+    assert all(
+        timeout is not None
+        and 0.0 < timeout <= transformer_worker_module._WORKER_GROUP_POLL_TIMEOUT_SECONDS
+        for timeout, _ in observed_wait_calls
+    )
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.asyncio
+async def test_poll_observer_task_cancellation_propagates_after_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+
+    async def cancel_after_poll() -> None:
+        raise asyncio.CancelledError
+
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_slow_ready_worker,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=cancel_after_poll,
+            _runtime=runtime,
+        )
+
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.asyncio
+async def test_task_cancellation_during_cleanup_finishes_cleanup_then_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_slow_shutdown_worker,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+    cleanup_task = asyncio.create_task(group.cleanup())
+    await asyncio.sleep(0.001)
+    cleanup_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup_task
+
+    assert group.state is RequestScopedWorkerGroupState.CLOSED
+    assert group.primary_failure_code is RequestScopedWorkerGroupFailureCode.CANCELLED
+    assert group.cleanup_report is not None
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.asyncio
+async def test_pre_requested_runtime_cancellation_is_primary_and_cleans_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_slow_ready_worker,
+    )
+    runtime.request_cancellation()
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=_observe_poll,
+            _runtime=runtime,
+        )
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.CANCELLED
+    assert raised.value.cleanup_report is not None
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.parametrize("actual_worker_count", (1, 2, 3, 4))
+@pytest.mark.asyncio
+async def test_real_spawn_group_computes_complete_epoch_in_canonical_shard_order(
+    monkeypatch: pytest.MonkeyPatch,
+    actual_worker_count: int,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    expected_results = _direct_shard_results(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: actual_worker_count,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+    )
+
+    try:
+        actual_results = await group.compute_epoch(
+            0,
+            weights,
+        )
+
+        assert tuple(result.shard.shard_index for result in actual_results) == (0, 1, 2, 3)
+
+        for actual, expected in zip(
+            actual_results,
+            expected_results,
+            strict=True,
+        ):
+            assert actual.shard == expected.shard
+            assert actual.processed_sequence_count == expected.processed_sequence_count
+            assert actual.loss == pytest.approx(
+                expected.loss,
+                rel=1e-6,
+                abs=1e-6,
+            )
+            np.testing.assert_allclose(
+                actual.gradient.storage,
+                expected.gradient.storage,
+                rtol=1e-6,
+                atol=1e-6,
+            )
+    finally:
+        report = await group.cleanup()
+
+    assert report.successful
+    assert report.process_exit_codes == (0,) * actual_worker_count
+
+
+class _RecordingSharedMemoryFactory:
+    def __init__(
+        self,
+        *,
+        fail_on_call: int | None = None,
+    ) -> None:
+        self.fail_on_call = fail_on_call
+        self.call_count = 0
+        self.created: list[_TrackedSharedMemory] = []
+
+    def __call__(
+        self,
+        name: str | None = None,
+        create: bool = False,
+        size: int = 0,
+    ) -> SharedMemory:
+        self.call_count += 1
+
+        if self.fail_on_call == self.call_count:
+            raise OSError("controlled shared-memory allocation failure")
+
+        tracked = _TrackedSharedMemory(
+            SharedMemory(
+                name=name,
+                create=create,
+                size=size,
+            )
+        )
+        self.created.append(tracked)
+        return cast(SharedMemory, tracked)
+
+
+def _assert_tracked_shared_memory_released(
+    blocks: tuple[_TrackedSharedMemory, ...],
+) -> None:
+    assert all(block.close_calls == 1 for block in blocks)
+    assert all(block.unlink_calls == 1 for block in blocks)
+
+
+class _StubRuntime:
+
+    def __init__(
+        self,
+        *,
+        results: tuple[LogicalTrainingShardResult, ...] | None = None,
+        cleanup_report: RequestScopedWorkerGroupCleanupReport | None = None,
+        start_failure: RequestScopedWorkerGroupError | None = None,
+        compute_failure: RequestScopedWorkerGroupError | None = None,
+    ) -> None:
+        self.results = results
+        self.cleanup_report = cleanup_report or _clean_report()
+        self.start_failure = start_failure
+        self.compute_failure = compute_failure
+        self.start_calls = 0
+        self.compute_calls = 0
+        self.cleanup_calls = 0
+        self.actual_worker_count: int | None = None
+        self.assigned_shard_ids_by_worker: tuple[tuple[int, ...], ...] | None = None
+        self.block_compute = False
+        self.compute_started = asyncio.Event()
+        self.compute_release = asyncio.Event()
+        self.start_weights: _Float32Array | None = None
+        self.compute_weights: _Float32Array | None = None
+
+    async def start(
+        self,
+        *,
+        num_layers: int,
+        current_weights: _Float32Array,
+        training_sequences: tuple[TransformerTrainingSequence, ...],
+        logical_shards: tuple[LogicalTrainingShard, ...],
+        actual_worker_count: int,
+        assigned_shard_ids_by_worker: tuple[tuple[int, ...], ...],
+        poll_observer: _PollObserver,
+    ) -> None:
+        del num_layers, training_sequences, logical_shards
+        self.start_calls += 1
+        self.start_weights = current_weights
+        self.actual_worker_count = actual_worker_count
+        self.assigned_shard_ids_by_worker = assigned_shard_ids_by_worker
+        await poll_observer()
+
+        if self.start_failure is not None:
+            raise self.start_failure
+
+    async def compute_epoch(
+        self,
+        *,
+        epoch: int,
+        current_weights: _Float32Array,
+        poll_observer: _PollObserver,
+    ) -> tuple[LogicalTrainingShardResult, ...]:
+        del epoch
+        self.compute_calls += 1
+        self.compute_weights = current_weights
+        self.compute_started.set()
+        await poll_observer()
+
+        if self.block_compute:
+            await self.compute_release.wait()
+
+        if self.compute_failure is not None:
+            raise self.compute_failure
+
+        if self.results is None:
+            raise AssertionError("Stub runtime requires results for a successful epoch.")
+
+        return self.results
+
+    async def cleanup(self) -> RequestScopedWorkerGroupCleanupReport:
+        self.cleanup_calls += 1
+        return self.cleanup_report
+
+
+@pytest.mark.parametrize(
+    ("reported_cpu_count", "expected_worker_count"),
+    (
+        (None, 1),
+        (0, 1),
+        (1, 1),
+        (2, 2),
+        (4, 4),
+        (5, 4),
+        (64, 4),
+    ),
+)
+def test_actual_worker_count_is_bounded_from_reported_cpu_count(
+    reported_cpu_count: int | None,
+    expected_worker_count: int,
+) -> None:
+    assert calculate_actual_worker_count(reported_cpu_count) == expected_worker_count
+
+
+@pytest.mark.parametrize(
+    ("actual_worker_count", "expected_assignments"),
+    (
+        (1, ((0, 1, 2, 3),)),
+        (2, ((0, 2), (1, 3))),
+        (3, ((0, 3), (1,), (2,))),
+        (4, ((0,), (1,), (2,), (3,))),
+    ),
+)
+def test_worker_shard_assignments_are_static_complete_and_ordered(
+    actual_worker_count: int,
+    expected_assignments: tuple[tuple[int, ...], ...],
+) -> None:
+    assignments = build_worker_shard_assignments(actual_worker_count)
+
+    assert assignments == expected_assignments
+    assert tuple(
+        sorted(shard_id for worker_shards in assignments for shard_id in worker_shards)
+    ) == (0, 1, 2, 3)
+    assert all(worker_shards == tuple(sorted(worker_shards)) for worker_shards in assignments)
+
+
+@pytest.mark.asyncio
+async def test_group_reads_cpu_count_once_and_retains_static_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    runtime = _StubRuntime(results=_shard_results(shards))
+    cpu_count_calls = 0
+
+    def fake_cpu_count() -> int:
+        nonlocal cpu_count_calls
+        cpu_count_calls += 1
+        return 3
+
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        fake_cpu_count,
+    )
+
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    assert cpu_count_calls == 1
+    assert runtime.actual_worker_count == 3
+    assert runtime.assigned_shard_ids_by_worker == ((0, 3), (1,), (2,))
+
+    await group.compute_epoch(0, weights)
+    await group.cleanup()
+
+    assert cpu_count_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_group_allocates_five_exact_range_parent_owned_shared_arrays() -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    layout = build_transformer_parameter_layout(num_layers)
+    weights[0] = np.float32(1.25)
+    weights[-1] = np.float32(-2.5)
+    expected_weights = np.array(
+        weights,
+        dtype=np.float32,
+        order="C",
+        copy=True,
+    )
+    factory = _RecordingSharedMemoryFactory()
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        shared_memory_factory=factory,
+    )
+
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    snapshot = runtime.allocation_snapshot()
+
+    assert factory.call_count == 5
+    assert len(factory.created) == 5
+    assert len({id(block) for block in factory.created}) == 5
+    assert snapshot.block_count == 5
+    assert snapshot.array_count == 5
+    assert snapshot.requested_byte_count == layout.total_byte_count
+    assert all(capacity >= layout.total_byte_count for capacity in snapshot.actual_byte_capacities)
+    assert snapshot.dtype_markers == (transformer_worker_module.WorkerNumericDType.FLOAT32,) * 5
+    assert snapshot.shapes == ((layout.total_float_count,),) * 5
+    assert snapshot.c_contiguous == (True,) * 5
+    assert snapshot.gradient_zeroed == (True,) * 4
+    assert not snapshot.cancellation_requested
+    assert np.array_equal(
+        runtime.copy_published_weights(),
+        expected_weights,
+    )
+
+    weights.fill(np.float32(99.0))
+    assert np.array_equal(
+        runtime.copy_published_weights(),
+        expected_weights,
+    )
+
+    report = await group.cleanup()
+    released_snapshot = runtime.allocation_snapshot()
+
+    assert report.successful
+    assert released_snapshot.block_count == 0
+    assert released_snapshot.array_count == 0
+    assert released_snapshot.cancellation_requested
+    _assert_tracked_shared_memory_released(tuple(factory.created))
+
+
+@pytest.mark.parametrize("fail_on_call", (1, 2, 3, 4, 5))
+@pytest.mark.asyncio
+async def test_partial_shared_memory_allocation_is_cleaned_transactionally(
+    fail_on_call: int,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    factory = _RecordingSharedMemoryFactory(
+        fail_on_call=fail_on_call,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        shared_memory_factory=factory,
+    )
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=_observe_poll,
+            _runtime=runtime,
+        )
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE
+    assert raised.value.cleanup_report is not None
+    assert raised.value.cleanup_report.successful
+    assert factory.call_count == fail_on_call
+    assert len(factory.created) == fail_on_call - 1
+    _assert_tracked_shared_memory_released(tuple(factory.created))
+
+
+@pytest.mark.asyncio
+async def test_concurrent_groups_own_independent_shared_memory_and_cancellation() -> None:
+    first_num_layers, first_weights, first_sequences, first_shards = _group_inputs()
+    second_num_layers, second_weights, second_sequences, second_shards = _group_inputs()
+    second_weights[0] = np.float32(0.125)
+
+    first_expected_results = _direct_shard_results(
+        first_num_layers,
+        first_weights,
+        first_sequences,
+        first_shards,
+    )
+    second_expected_results = _direct_shard_results(
+        second_num_layers,
+        second_weights,
+        second_sequences,
+        second_shards,
+    )
+
+    first_factory = _RecordingSharedMemoryFactory()
+    second_factory = _RecordingSharedMemoryFactory()
+    first_runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        shared_memory_factory=first_factory,
+    )
+    second_runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        shared_memory_factory=second_factory,
+    )
+
+    first_group, second_group = await asyncio.gather(
+        create_request_scoped_worker_group(
+            first_num_layers,
+            first_weights,
+            first_sequences,
+            first_shards,
+            poll_observer=_observe_poll,
+            _runtime=first_runtime,
+        ),
+        create_request_scoped_worker_group(
+            second_num_layers,
+            second_weights,
+            second_sequences,
+            second_shards,
+            poll_observer=_observe_poll,
+            _runtime=second_runtime,
+        ),
+    )
+
+    first_report: RequestScopedWorkerGroupCleanupReport | None = None
+
+    try:
+        assert {id(block) for block in first_factory.created}.isdisjoint(
+            id(block) for block in second_factory.created
+        )
+        assert np.array_equal(
+            first_runtime.copy_published_weights(),
+            first_weights,
+        )
+        assert np.array_equal(
+            second_runtime.copy_published_weights(),
+            second_weights,
+        )
+        assert not first_runtime.allocation_snapshot().cancellation_requested
+        assert not second_runtime.allocation_snapshot().cancellation_requested
+
+        first_results, second_results = await asyncio.gather(
+            first_group.compute_epoch(
+                0,
+                first_weights,
+            ),
+            second_group.compute_epoch(
+                0,
+                second_weights,
+            ),
+        )
+
+        _assert_shard_results_match(
+            first_results,
+            first_expected_results,
+        )
+        _assert_shard_results_match(
+            second_results,
+            second_expected_results,
+        )
+
+        for first_result, second_result in zip(
+            first_results,
+            second_results,
+            strict=True,
+        ):
+            assert not np.shares_memory(
+                first_result.gradient.storage,
+                second_result.gradient.storage,
+            )
+
+        first_report = await first_group.cleanup()
+
+        assert first_report.successful
+        assert first_runtime.allocation_snapshot().cancellation_requested
+        assert not second_runtime.allocation_snapshot().cancellation_requested
+
+        second_followup_results = await second_group.compute_epoch(
+            1,
+            second_weights,
+        )
+        _assert_shard_results_match(
+            second_followup_results,
+            second_expected_results,
+        )
+    finally:
+        if first_report is None:
+            first_report = await first_group.cleanup()
+
+        second_report = await second_group.cleanup()
+
+    assert first_report is not None
+    assert first_report.successful
+    assert second_report.successful
+
+    _assert_tracked_shared_memory_released(tuple(first_factory.created))
+    _assert_tracked_shared_memory_released(tuple(second_factory.created))
+
+
+@pytest.mark.asyncio
+async def test_sequential_groups_use_fresh_resources_and_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    expected_results = _direct_shard_results(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+
+    first_factory = _RecordingSharedMemoryFactory()
+    first_runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        shared_memory_factory=first_factory,
+    )
+    first_group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=first_runtime,
+    )
+
+    first_results: tuple[LogicalTrainingShardResult, ...] | None = None
+
+    try:
+        first_results = await first_group.compute_epoch(
+            0,
+            weights,
+        )
+    finally:
+        first_report = await first_group.cleanup()
+
+    assert first_results is not None
+    assert first_report.successful
+    assert first_group.state is RequestScopedWorkerGroupState.CLOSED
+    _assert_shard_results_match(
+        first_results,
+        expected_results,
+    )
+    _assert_tracked_shared_memory_released(tuple(first_factory.created))
+
+    second_factory = _RecordingSharedMemoryFactory()
+    second_runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        shared_memory_factory=second_factory,
+    )
+    second_group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=second_runtime,
+    )
+
+    second_results: tuple[LogicalTrainingShardResult, ...] | None = None
+
+    try:
+        assert second_group is not first_group
+        assert second_group.state is RequestScopedWorkerGroupState.READY
+        assert {id(block) for block in first_factory.created}.isdisjoint(
+            id(block) for block in second_factory.created
+        )
+        assert first_runtime.allocation_snapshot().cancellation_requested
+        assert not second_runtime.allocation_snapshot().cancellation_requested
+
+        second_results = await second_group.compute_epoch(
+            0,
+            weights,
+        )
+    finally:
+        second_report = await second_group.cleanup()
+
+    assert second_results is not None
+    assert second_report.successful
+    assert second_group.state is RequestScopedWorkerGroupState.CLOSED
+    _assert_shard_results_match(
+        second_results,
+        expected_results,
+    )
+
+    for first_result, second_result in zip(
+        first_results,
+        second_results,
+        strict=True,
+    ):
+        assert first_result is not second_result
+        assert not np.shares_memory(
+            first_result.gradient.storage,
+            second_result.gradient.storage,
+        )
+
+    _assert_tracked_shared_memory_released(tuple(second_factory.created))
+
+
+def test_worker_group_public_contract_is_exact_and_immutable() -> None:
+    assert tuple(transformer_worker_module.__all__) == _EXPECTED_PUBLIC_SYMBOLS
+
+    for symbol in _EXPECTED_PUBLIC_SYMBOLS:
+        assert hasattr(transformer_worker_module, symbol)
+
+    assert tuple(RequestScopedWorkerGroupState) == (
+        RequestScopedWorkerGroupState.ALLOCATED,
+        RequestScopedWorkerGroupState.STARTING,
+        RequestScopedWorkerGroupState.READY,
+        RequestScopedWorkerGroupState.COMPUTING,
+        RequestScopedWorkerGroupState.STOPPING,
+        RequestScopedWorkerGroupState.CLOSED,
+        RequestScopedWorkerGroupState.FAILED,
+    )
+    assert tuple(RequestScopedWorkerGroupFailureCode) == (
+        RequestScopedWorkerGroupFailureCode.INVALID_INPUT,
+        RequestScopedWorkerGroupFailureCode.INVALID_STATE,
+        RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+        RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+        RequestScopedWorkerGroupFailureCode.CANCELLED,
+        RequestScopedWorkerGroupFailureCode.TIMEOUT,
+        RequestScopedWorkerGroupFailureCode.CLEANUP_FAILURE,
+        RequestScopedWorkerGroupFailureCode.INTERNAL_FAILURE,
+    )
+    assert tuple(RequestScopedWorkerGroupCleanupFailureCode) == (
+        RequestScopedWorkerGroupCleanupFailureCode.CANCELLATION_SIGNAL,
+        RequestScopedWorkerGroupCleanupFailureCode.STOP_SEND,
+        RequestScopedWorkerGroupCleanupFailureCode.COOPERATIVE_WAIT,
+        RequestScopedWorkerGroupCleanupFailureCode.TERMINATE,
+        RequestScopedWorkerGroupCleanupFailureCode.TERMINATE_WAIT,
+        RequestScopedWorkerGroupCleanupFailureCode.KILL,
+        RequestScopedWorkerGroupCleanupFailureCode.JOIN,
+        RequestScopedWorkerGroupCleanupFailureCode.EXIT_CODE,
+        RequestScopedWorkerGroupCleanupFailureCode.PIPE_CLOSE,
+        RequestScopedWorkerGroupCleanupFailureCode.PROCESS_CLOSE,
+        RequestScopedWorkerGroupCleanupFailureCode.VIEW_RELEASE,
+        RequestScopedWorkerGroupCleanupFailureCode.SHARED_MEMORY_CLOSE,
+        RequestScopedWorkerGroupCleanupFailureCode.SHARED_MEMORY_UNLINK,
+        RequestScopedWorkerGroupCleanupFailureCode.INTERNAL,
+    )
+
+    report = _clean_report()
+
+    assert dataclasses.is_dataclass(RequestScopedWorkerGroupCleanupReport)
+    assert tuple(field.name for field in fields(RequestScopedWorkerGroupCleanupReport)) == (
+        "cooperative_shutdown_completed",
+        "terminate_required",
+        "kill_required",
+        "process_exit_codes",
+        "secondary_failures",
+    )
+    assert not hasattr(report, "__dict__")
+    assert report.successful
+
+    with pytest.raises(FrozenInstanceError):
+        report.terminate_required = True
+
+    error = RequestScopedWorkerGroupError(
+        RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+    )
+    assert str(error) == "Request-scoped worker group operation failed."
+    assert error.code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+    assert error.cleanup_report is None
+
+    assert tuple(inspect.signature(create_request_scoped_worker_group).parameters) == (
+        "num_layers",
+        "current_weights",
+        "training_sequences",
+        "logical_shards",
+        "poll_observer",
+        "_runtime",
+    )
+    assert tuple(inspect.signature(RequestScopedWorkerGroup.compute_epoch).parameters) == (
+        "self",
+        "epoch",
+        "current_weights",
+    )
+    assert tuple(inspect.signature(RequestScopedWorkerGroup.cleanup).parameters) == ("self",)
+
+
+@pytest.mark.asyncio
+async def test_group_rejects_compute_before_ready_and_after_cleanup() -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    runtime = _StubRuntime(results=_shard_results(shards))
+    group = RequestScopedWorkerGroup(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    assert group.state is RequestScopedWorkerGroupState.ALLOCATED
+
+    with pytest.raises(RequestScopedWorkerGroupError) as before_ready:
+        await group.compute_epoch(0, weights)
+
+    assert before_ready.value.code is RequestScopedWorkerGroupFailureCode.INVALID_STATE
+    assert group.state is RequestScopedWorkerGroupState.ALLOCATED
+
+    first_report = await group.cleanup()
+    second_report = await group.cleanup()
+
+    assert first_report is second_report
+    assert runtime.cleanup_calls == 1
+    assert group.state is RequestScopedWorkerGroupState.CLOSED
+    assert not group.successful
+
+    with pytest.raises(RequestScopedWorkerGroupError) as after_cleanup:
+        await group.compute_epoch(0, weights)
+
+    assert after_cleanup.value.code is RequestScopedWorkerGroupFailureCode.INVALID_STATE
+
+
+@pytest.mark.asyncio
+async def test_group_rejects_overlapping_epochs_and_returns_independent_results() -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    runtime_results = _shard_results(shards)
+    runtime = _StubRuntime(results=runtime_results)
+    runtime.block_compute = True
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    assert group.state is RequestScopedWorkerGroupState.READY
+    assert runtime.start_weights is not None
+    assert not np.shares_memory(runtime.start_weights, weights)
+
+    compute_task = asyncio.create_task(group.compute_epoch(0, weights))
+    await runtime.compute_started.wait()
+
+    assert group.state is RequestScopedWorkerGroupState.COMPUTING
+
+    with pytest.raises(RequestScopedWorkerGroupError) as overlapping:
+        await group.compute_epoch(1, weights)
+
+    assert overlapping.value.code is RequestScopedWorkerGroupFailureCode.INVALID_STATE
+
+    runtime.compute_release.set()
+    copied_results = await compute_task
+
+    assert group.state is RequestScopedWorkerGroupState.READY
+    assert runtime.compute_weights is not None
+    assert not np.shares_memory(runtime.compute_weights, weights)
+    assert len(copied_results) == 4
+
+    for copied, original, expected_shard in zip(
+        copied_results,
+        runtime_results,
+        shards,
+        strict=True,
+    ):
+        assert copied.shard == expected_shard
+        assert copied.processed_sequence_count == original.processed_sequence_count
+        assert copied.loss == original.loss
+        assert np.array_equal(copied.gradient.storage, original.gradient.storage)
+        assert not np.shares_memory(
+            copied.gradient.storage,
+            original.gradient.storage,
+        )
+
+    original_first_value = np.float32(runtime_results[0].gradient.storage[0])
+    copied_results[0].gradient.storage[0] = np.float32(999.0)
+    assert runtime_results[0].gradient.storage[0] == original_first_value
+
+    await group.cleanup()
+    assert group.successful
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_remains_primary_when_cleanup_also_fails() -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    cleanup_report = RequestScopedWorkerGroupCleanupReport(
+        cooperative_shutdown_completed=False,
+        terminate_required=True,
+        kill_required=False,
+        process_exit_codes=(1,),
+        secondary_failures=(RequestScopedWorkerGroupCleanupFailureCode.PIPE_CLOSE,),
+    )
+    runtime = _StubRuntime(
+        results=_shard_results(shards),
+        cleanup_report=cleanup_report,
+        start_failure=RequestScopedWorkerGroupError(
+            RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE,
+        ),
+    )
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await create_request_scoped_worker_group(
+            num_layers,
+            weights,
+            sequences,
+            shards,
+            poll_observer=_observe_poll,
+            _runtime=runtime,
+        )
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.STARTUP_FAILURE
+    assert raised.value.cleanup_report is cleanup_report
+    assert runtime.start_calls == 1
+    assert runtime.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_epoch_failure_is_preserved_across_cleanup_failure() -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    cleanup_report = RequestScopedWorkerGroupCleanupReport(
+        cooperative_shutdown_completed=False,
+        terminate_required=False,
+        kill_required=True,
+        process_exit_codes=(None,),
+        secondary_failures=(RequestScopedWorkerGroupCleanupFailureCode.SHARED_MEMORY_UNLINK,),
+    )
+    runtime = _StubRuntime(
+        results=_shard_results(shards),
+        cleanup_report=cleanup_report,
+        compute_failure=RequestScopedWorkerGroupError(
+            RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE,
+        ),
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await group.compute_epoch(0, weights)
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+    assert group.state is RequestScopedWorkerGroupState.FAILED
+    assert group.primary_failure_code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+
+    report = await group.cleanup()
+
+    assert report is cleanup_report
+    assert group.state is RequestScopedWorkerGroupState.CLOSED
+    assert group.primary_failure_code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+    assert not group.successful
+
+
+@pytest.mark.asyncio
+async def test_cleanup_only_failure_prevents_successful_group_outcome() -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    cleanup_report = RequestScopedWorkerGroupCleanupReport(
+        cooperative_shutdown_completed=True,
+        terminate_required=True,
+        kill_required=False,
+        process_exit_codes=(0,),
+        secondary_failures=(),
+    )
+    runtime = _StubRuntime(
+        results=_shard_results(shards),
+        cleanup_report=cleanup_report,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    report = await group.cleanup()
+
+    assert report is cleanup_report
+    assert group.primary_failure_code is RequestScopedWorkerGroupFailureCode.CLEANUP_FAILURE
+    assert group.state is RequestScopedWorkerGroupState.CLOSED
+    assert not group.successful
+
+
+@pytest.mark.parametrize(
+    "completion_order",
+    (
+        (3, 2, 1, 0),
+        (2, 0, 3, 1),
+    ),
+)
+@pytest.mark.asyncio
+async def test_epoch_results_ignore_controlled_worker_completion_order(
+    monkeypatch: pytest.MonkeyPatch,
+    completion_order: tuple[int, ...],
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    expected_results = _direct_shard_results(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 4,
+    )
+    completion_waiter = _CompletionOrderWaiter(completion_order)
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _connection_waiter=completion_waiter,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    try:
+        actual_results = await group.compute_epoch(
+            2,
+            weights,
+        )
+
+        assert completion_waiter.returned_connection_orders[-1] == completion_order
+
+        for actual, expected in zip(
+            actual_results,
+            expected_results,
+            strict=True,
+        ):
+            assert actual.shard == expected.shard
+            assert actual.loss == pytest.approx(
+                expected.loss,
+                rel=1e-6,
+                abs=1e-6,
+            )
+            np.testing.assert_allclose(
+                actual.gradient.storage,
+                expected.gradient.storage,
+                rtol=1e-6,
+                atol=1e-6,
+            )
+    finally:
+        report = await group.cleanup()
+
+    assert report.successful
+    assert report.process_exit_codes == (0, 0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "worker_target",
+    (
+        _controlled_wrong_epoch_result_worker,
+        _controlled_failure_epoch_worker,
+        _controlled_malformed_epoch_result_worker,
+        _controlled_exit_during_epoch_worker,
+    ),
+)
+@pytest.mark.asyncio
+async def test_epoch_rejects_invalid_failure_malformed_or_exited_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_target: Callable[[Connection, int, object], None],
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=cast(
+            transformer_worker_module._WorkerProcessTarget,
+            worker_target,
+        ),
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    try:
+        with pytest.raises(RequestScopedWorkerGroupError) as raised:
+            await group.compute_epoch(
+                7,
+                weights,
+            )
+
+        assert raised.value.code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+    finally:
+        await group.cleanup()
+
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.asyncio
+async def test_epoch_send_failure_is_reported_without_a_second_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    original_sender = transformer_worker_module._send_worker_message
+    compute_send_calls = 0
+
+    def fail_compute_send(
+        connection: transformer_worker_module._WorkerConnection,
+        message: object,
+    ) -> None:
+        nonlocal compute_send_calls
+
+        if type(message) is transformer_worker_module.ComputeMessage:
+            compute_send_calls += 1
+            raise BrokenPipeError("controlled compute send failure")
+
+        original_sender(
+            connection,
+            message,
+        )
+
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_send_worker_message",
+        fail_compute_send,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+    )
+
+    try:
+        with pytest.raises(RequestScopedWorkerGroupError) as raised:
+            await group.compute_epoch(
+                6,
+                weights,
+            )
+
+        assert raised.value.code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+        assert compute_send_calls == 1
+    finally:
+        report = await group.cleanup()
+
+    assert report.successful
+
+
+@pytest.mark.asyncio
+async def test_epoch_rejects_duplicate_worker_result_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 2,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_duplicate_epoch_result_worker,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    try:
+        with pytest.raises(RequestScopedWorkerGroupError) as raised:
+            await group.compute_epoch(
+                8,
+                weights,
+            )
+
+        assert raised.value.code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+    finally:
+        report = await group.cleanup()
+
+    assert report.successful
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_epoch_timeout_uses_one_absolute_deadline_and_bounded_polls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_WORKER_GROUP_EPOCH_TIMEOUT_SECONDS",
+        0.21,
+    )
+    wait_spy = _DelegatingWaitSpy()
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_never_result_worker,
+        _connection_waiter=wait_spy,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+    startup_wait_call_count = len(wait_spy.calls)
+
+    try:
+        with pytest.raises(RequestScopedWorkerGroupError) as raised:
+            await group.compute_epoch(
+                3,
+                weights,
+            )
+
+        epoch_wait_calls = tuple(wait_spy.calls[startup_wait_call_count:])
+
+        assert raised.value.code is RequestScopedWorkerGroupFailureCode.TIMEOUT
+        assert len(epoch_wait_calls) >= 2
+        assert all(
+            timeout is not None
+            and 0.0 < timeout <= transformer_worker_module._WORKER_GROUP_POLL_TIMEOUT_SECONDS
+            for timeout, _ in epoch_wait_calls
+        )
+    finally:
+        report = await group.cleanup()
+
+    assert report.successful
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.asyncio
+async def test_epoch_does_not_read_shared_gradients_before_every_worker_commits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 2,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_WORKER_GROUP_EPOCH_TIMEOUT_SECONDS",
+        0.21,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=(_controlled_partial_commit_with_nonfinite_gradient_worker),
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    try:
+        with pytest.raises(RequestScopedWorkerGroupError) as raised:
+            await group.compute_epoch(
+                4,
+                weights,
+            )
+
+        assert raised.value.code is RequestScopedWorkerGroupFailureCode.TIMEOUT
+    finally:
+        report = await group.cleanup()
+
+    assert report.successful
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_epoch_rejects_nonfinite_shared_gradient_after_complete_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=(_controlled_partial_commit_with_nonfinite_gradient_worker),
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    try:
+        with pytest.raises(RequestScopedWorkerGroupError) as raised:
+            await group.compute_epoch(
+                5,
+                weights,
+            )
+
+        assert raised.value.code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+    finally:
+        report = await group.cleanup()
+
+    assert report.successful
+    assert runtime.allocation_snapshot().block_count == 0
+    assert runtime.startup_snapshot().alive == (False,)
+
+
+@pytest.mark.parametrize(
+    ("worker_target", "expected_failure"),
+    (
+        (
+            _controlled_exit_without_stopped_worker,
+            RequestScopedWorkerGroupCleanupFailureCode.COOPERATIVE_WAIT,
+        ),
+        (
+            _controlled_stopped_nonzero_exit_worker,
+            RequestScopedWorkerGroupCleanupFailureCode.EXIT_CODE,
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_cooperative_shutdown_requires_stopped_record_and_zero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_target: Callable[[Connection, int, object], None],
+    expected_failure: RequestScopedWorkerGroupCleanupFailureCode,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=cast(
+            transformer_worker_module._WorkerProcessTarget,
+            worker_target,
+        ),
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    report = await group.cleanup()
+
+    assert not report.successful
+    assert not report.cooperative_shutdown_completed
+    assert not report.terminate_required
+    assert not report.kill_required
+    assert expected_failure in report.secondary_failures
+    assert runtime.allocation_snapshot().block_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_terminates_worker_that_ignores_cooperative_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_WORKER_GROUP_INTERIM_SHUTDOWN_TIMEOUT_SECONDS",
+        0.05,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_ignore_stop_worker,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    report = await group.cleanup()
+
+    assert not report.successful
+    assert not report.cooperative_shutdown_completed
+    assert report.terminate_required
+    assert not report.kill_required
+    assert runtime.allocation_snapshot().block_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_kills_survivor_after_terminate_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_WORKER_GROUP_INTERIM_SHUTDOWN_TIMEOUT_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_terminate_worker_process",
+        lambda process: None,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_ignore_stop_worker,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    report = await group.cleanup()
+
+    assert not report.successful
+    assert report.terminate_required
+    assert report.kill_required
+    assert runtime.allocation_snapshot().block_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_attempts_later_resource_stages_after_earlier_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime()
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+    events: list[str] = []
+
+    original_pipe_close = transformer_worker_module._close_parent_worker_connection
+    original_process_close = transformer_worker_module._close_parent_worker_process
+    original_view_release = transformer_worker_module._release_parent_memoryview
+    original_shared_close = transformer_worker_module._close_parent_shared_memory
+    original_shared_unlink = transformer_worker_module._unlink_parent_shared_memory
+
+    def fail_pipe_close_after_delegate(
+        connection: transformer_worker_module._WorkerConnection,
+    ) -> None:
+        events.append("pipe_close")
+        original_pipe_close(connection)
+        raise OSError("controlled pipe-close diagnostic")
+
+    def fail_process_close_after_delegate(process: BaseProcess) -> None:
+        events.append("process_close")
+        original_process_close(process)
+        raise OSError("controlled process-close diagnostic")
+
+    def fail_view_release_after_delegate(buffer: memoryview) -> None:
+        events.append("view_release")
+        original_view_release(buffer)
+        raise BufferError("controlled view-release diagnostic")
+
+    def fail_shared_close_after_delegate(handle: SharedMemory) -> None:
+        events.append("shared_close")
+        original_shared_close(handle)
+        raise OSError("controlled shared-close diagnostic")
+
+    def fail_shared_unlink_after_delegate(handle: SharedMemory) -> None:
+        events.append("shared_unlink")
+        original_shared_unlink(handle)
+        raise OSError("controlled shared-unlink diagnostic")
+
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_close_parent_worker_connection",
+        fail_pipe_close_after_delegate,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_close_parent_worker_process",
+        fail_process_close_after_delegate,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_release_parent_memoryview",
+        fail_view_release_after_delegate,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_close_parent_shared_memory",
+        fail_shared_close_after_delegate,
+    )
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_unlink_parent_shared_memory",
+        fail_shared_unlink_after_delegate,
+    )
+
+    first_report = await group.cleanup()
+    first_events = tuple(events)
+    second_report = await group.cleanup()
+
+    assert first_report is second_report
+    assert tuple(events) == first_events
+
+    assert first_events.index("pipe_close") < first_events.index("process_close")
+    assert first_events.index("process_close") < first_events.index("view_release")
+    assert first_events.index("view_release") < first_events.index("shared_close")
+    assert first_events.index("shared_close") < first_events.index("shared_unlink")
+
+    assert first_events.count("view_release") == 5
+    assert first_events.count("shared_close") == 5
+    assert first_events.count("shared_unlink") == 5
+
+    assert {
+        RequestScopedWorkerGroupCleanupFailureCode.PIPE_CLOSE,
+        RequestScopedWorkerGroupCleanupFailureCode.PROCESS_CLOSE,
+        RequestScopedWorkerGroupCleanupFailureCode.VIEW_RELEASE,
+        RequestScopedWorkerGroupCleanupFailureCode.SHARED_MEMORY_CLOSE,
+        RequestScopedWorkerGroupCleanupFailureCode.SHARED_MEMORY_UNLINK,
+    }.issubset(first_report.secondary_failures)
+
+    assert not first_report.successful
+
+
+@pytest.mark.asyncio
+async def test_primary_epoch_failure_survives_secondary_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    runtime = transformer_worker_module._SharedMemoryRequestScopedWorkerGroupRuntime(
+        _worker_target=_controlled_failure_epoch_worker,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+        _runtime=runtime,
+    )
+
+    with pytest.raises(RequestScopedWorkerGroupError) as raised:
+        await group.compute_epoch(
+            0,
+            weights,
+        )
+
+    original_pipe_close = transformer_worker_module._close_parent_worker_connection
+
+    def fail_pipe_close_after_delegate(
+        connection: transformer_worker_module._WorkerConnection,
+    ) -> None:
+        original_pipe_close(connection)
+        raise OSError("controlled pipe-close diagnostic")
+
+    monkeypatch.setattr(
+        transformer_worker_module,
+        "_close_parent_worker_connection",
+        fail_pipe_close_after_delegate,
+    )
+
+    report = await group.cleanup()
+
+    assert raised.value.code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+    assert group.primary_failure_code is RequestScopedWorkerGroupFailureCode.EPOCH_FAILURE
+    assert RequestScopedWorkerGroupCleanupFailureCode.PIPE_CLOSE in report.secondary_failures
+
+
+
+
+@pytest.mark.asyncio
+async def test_cleanup_only_resource_failure_prevents_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    num_layers, weights, sequences, shards = _group_inputs()
+    monkeypatch.setattr(
+        transformer_worker_module.os,
+        "cpu_count",
+        lambda: 1,
+    )
+    group = await create_request_scoped_worker_group(
+        num_layers,
+        weights,
+        sequences,
+        shards,
+        poll_observer=_observe_poll,
+    )
+    original_unlink = transformer_worker_module._unlink_parent_shared_memory
+
+    def fail_unlink_after_delegate(handle:

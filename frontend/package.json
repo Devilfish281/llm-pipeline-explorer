@@ -1,0 +1,31 @@
+{
+  "name": "llm-pipeline-explorer-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint",
+    "lint:fix": "eslint --fix",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@knadh/oat": "^0.5.1",
+    "@w3cj/ruta": "^1.1.2",
+    "clsx": "^2.1.1",
+    "hono": "^4.12.12"
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "^8.1.0",
+    "@eslint-react/eslint-plugin": "^3.0.0",
+    "@types/node": "^25.5.2",
+    "eslint": "^10.1.0",
+    "eslint-plugin-format": "^2.0.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.7",
+    "vitest": "^4.1.3"
+  }
+}

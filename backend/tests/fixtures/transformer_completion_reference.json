@@ -1,0 +1,69 @@
+{
+  "provenance": {
+    "source": "Independent scalar calculations and controlled constant-logit cases; expected values were not produced by Ticket 018 completion functions.",
+    "notes": "The generation case uses a zeroed one-layer model with only headB set. The final-loss case uses uniform float32 probabilities from an all-zero model."
+  },
+  "generation": {
+    "temperature": 0.8,
+    "topP": 0.9,
+    "maxTokens": 5,
+    "headBias": {
+      "default": -5.0,
+      "selected": [
+        [0, 3.0],
+        [1, 2.0],
+        [2, 1.0]
+      ]
+    },
+    "expected": {
+      "0": " once upon a the the. the the",
+      "1": " once upon a. the the the the",
+      "7": " once upon a the the. the the"
+    }
+  },
+  "finalLoss": {
+    "vocabSize": 392,
+    "uniformProbabilityFloat32": 0.0025510203558951616,
+    "expected": 5.971262
+  },
+  "savedModel": {
+    "selectedStorageValues": [1.2345678, -1e-7, -1.2345678],
+    "expectedPublicValues": [1.234568, 0.0, -1.234568],
+    "topLevelKeys": ["type", "config", "vocab", "merges", "weights"],
+    "configKeys": [
+      "vocabSize",
+      "contextLen",
+      "embDim",
+      "numHeads",
+      "ffDim",
+      "numLayers"
+    ],
+    "weightKeys": [
+      "tokEmb",
+      "posEmb",
+      "blocks",
+      "lnFGamma",
+      "lnFBeta",
+      "headW",
+      "headB"
+    ],
+    "blockKeys": [
+      "ln1Gamma",
+      "ln1Beta",
+      "wQ",
+      "bQ",
+      "wK",
+      "bK",
+      "wV",
+      "bV",
+      "wO",
+      "bO",
+      "ln2Gamma",
+      "ln2Beta",
+      "ff1W",
+      "ff1B",
+      "ff2W",
+      "ff2B"
+    ]
+  }
+}

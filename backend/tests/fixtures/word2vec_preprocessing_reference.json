@@ -1,0 +1,370 @@
+{
+  "source": "Captured independently from the supplied TypeScript Reference Implementation",
+  "canonical_json": "UTF-8 JSON with ensure_ascii=false and separators=(comma, colon)",
+  "corpus": {
+    "count": 107,
+    "sha256": "9b500d994106daa311f94fb1eaffb3ed32b0280b33dc47f8ead61c530ab07eb5",
+    "first": "the cat sat on the mat",
+    "last": "the tree grows in the forest"
+  },
+  "training_text_sha256": "6edc8540a7a85fb807f9b5451696fa2ba68e92b2236e6e008d4037011b066c50",
+  "merge_limit": 500,
+  "merges": {
+    "count": 423,
+    "sha256": "290da771363d46230c66928358a01ce66a06f2b917b974c35ecdb18acc14dfb8",
+    "first": {
+      "pair": ["h", "e"],
+      "merged": "he",
+      "frequency": 141
+    },
+    "last": {
+      "pair": ["grow", "s"],
+      "merged": "grows",
+      "frequency": 1
+    }
+  },
+  "tokenized_sentences": {
+    "count": 107,
+    "sha256": "f4aa336b2cc18a165ece949e69bb181ddae012b993ff54c36a25ac5cd1d0b52c",
+    "representative": [
+      {
+        "index": 0,
+        "sentence": "the cat sat on the mat",
+        "tokens": [
+          "the",
+          " ",
+          "cat",
+          " ",
+          "sat",
+          " ",
+          "on",
+          " ",
+          "the",
+          " ",
+          "mat"
+        ]
+      },
+      {
+        "index": 8,
+        "sentence": "the cat and the dog are pets",
+        "tokens": [
+          "the",
+          " ",
+          "cat",
+          " ",
+          "and",
+          " ",
+          "the",
+          " ",
+          "dog",
+          " ",
+          "are",
+          " ",
+          "pets"
+        ]
+      },
+      {
+        "index": 17,
+        "sentence": "cats and dogs are popular pets",
+        "tokens": [
+          "cats",
+          " ",
+          "and",
+          " ",
+          "dogs",
+          " ",
+          "are",
+          " ",
+          "popular",
+          " ",
+          "pets"
+        ]
+      },
+      {
+        "index": 45,
+        "sentence": "the king is a man who rules",
+        "tokens": [
+          "the",
+          " ",
+          "king",
+          " ",
+          "is",
+          " ",
+          "a",
+          " ",
+          "man",
+          " ",
+          "who",
+          " ",
+          "rules"
+        ]
+      },
+      {
+        "index": 64,
+        "sentence": "the prince is a boy of noble birth",
+        "tokens": [
+          "the",
+          " ",
+          "prince",
+          " ",
+          "is",
+          " ",
+          "a",
+          " ",
+          "boy",
+          " ",
+          "of",
+          " ",
+          "noble",
+          " ",
+          "birth"
+        ]
+      },
+      {
+        "index": 96,
+        "sentence": "the woman is tall and smart",
+        "tokens": [
+          "the",
+          " ",
+          "woman",
+          " ",
+          "is",
+          " ",
+          "tall",
+          " ",
+          "and",
+          " ",
+          "smart"
+        ]
+      },
+      {
+        "index": 106,
+        "sentence": "the tree grows in the forest",
+        "tokens": [
+          "the",
+          " ",
+          "tree",
+          " ",
+          "grows",
+          " ",
+          "in",
+          " ",
+          "the",
+          " ",
+          "forest"
+        ]
+      }
+    ]
+  },
+  "frequencies": {
+    "count": 192,
+    "sha256": "ba2434f3a6fc634bcb97d520e610c1c52d05fbd5e4ea6750f8f719b783c2b211"
+  },
+  "vocabulary": {
+    "count": 192,
+    "sha256": "2d544e30168d4a3b6589034decd87dd71589224620b379513e7549f9d045cf9f",
+    "first_20": [
+      " ",
+      "the",
+      "a",
+      "is",
+      "and",
+      "cat",
+      "in",
+      "dog",
+      "man",
+      "woman",
+      "king",
+      "queen",
+      "are",
+      "of",
+      "boy",
+      "girl",
+      "on",
+      "at",
+      "prince",
+      "princess"
+    ]
+  },
+  "indices_sha256": "e90bfbce0a2897c8cc30dac8650894d84be5e7c2dd1e61d582b54790d56cdb66",
+  "stable_tie_groups": [
+    {
+      "frequency": 10,
+      "tokens": ["dog", "man", "woman"]
+    },
+    {
+      "frequency": 6,
+      "tokens": ["on", "at", "prince", "princess", "young"]
+    },
+    {
+      "frequency": 5,
+      "tokens": ["small", "big", "food", "works"]
+    },
+    {
+      "frequency": 4,
+      "tokens": ["pet", "she", "he", "animal", "sky", "for", "royal", "will"]
+    }
+  ],
+  "training_pairs": {
+    "1": {
+      "count": 2092,
+      "sha256_big_endian_uint16_pairs": "7a094782add6eeb528f58cca9d419f047c6fad9bcb4a00c8964f91c454956ee8",
+      "first_12": [
+        [1, 0],
+        [0, 1],
+        [0, 5],
+        [5, 0],
+        [5, 0],
+        [0, 5],
+        [0, 43],
+        [43, 0],
+        [43, 0],
+        [0, 43],
+        [0, 16],
+        [16, 0]
+      ],
+      "last_12": [
+        [191, 0],
+        [0, 191],
+        [0, 6],
+        [6, 0],
+        [6, 0],
+        [0, 6],
+        [0, 1],
+        [1, 0],
+        [1, 0],
+        [0, 1],
+        [0, 36],
+        [36, 0]
+      ]
+    },
+    "2": {
+      "count": 3970,
+      "sha256_big_endian_uint16_pairs": "e8a98754c236187c8cee28ad9a20f5dccad6eb1dfc2158cd66fc5d27f6324045",
+      "first_12": [
+        [1, 0],
+        [1, 5],
+        [0, 1],
+        [0, 5],
+        [0, 0],
+        [5, 1],
+        [5, 0],
+        [5, 0],
+        [5, 43],
+        [0, 0],
+        [0, 5],
+        [0, 43]
+      ],
+      "last_12": [
+        [0, 6],
+        [0, 1],
+        [0, 0],
+        [1, 6],
+        [1, 0],
+        [1, 0],
+        [1, 36],
+        [0, 0],
+        [0, 1],
+        [0, 36],
+        [36, 1],
+        [36, 0]
+      ]
+    },
+    "3": {
+      "count": 5634,
+      "sha256_big_endian_uint16_pairs": "297a4fffb6c6a925ff978ac13f775840d0b9b6abde488b60c1936fb8683b7b19",
+      "first_12": [
+        [1, 0],
+        [1, 5],
+        [1, 0],
+        [0, 1],
+        [0, 5],
+        [0, 0],
+        [0, 43],
+        [5, 1],
+        [5, 0],
+        [5, 0],
+        [5, 43],
+        [5, 0]
+      ],
+      "last_12": [
+        [1, 0],
+        [1, 6],
+        [1, 0],
+        [1, 0],
+        [1, 36],
+        [0, 6],
+        [0, 0],
+        [0, 1],
+        [0, 36],
+        [36, 0],
+        [36, 1],
+        [36, 0]
+      ]
+    },
+    "4": {
+      "count": 7084,
+      "sha256_big_endian_uint16_pairs": "886d512b40f8a91fad354ef5342bf7a36bde00fe3e942fc0b43eb9da7f603c0a",
+      "first_12": [
+        [1, 0],
+        [1, 5],
+        [1, 0],
+        [1, 43],
+        [0, 1],
+        [0, 5],
+        [0, 0],
+        [0, 43],
+        [0, 0],
+        [5, 1],
+        [5, 0],
+        [5, 0]
+      ],
+      "last_12": [
+        [1, 0],
+        [1, 0],
+        [1, 36],
+        [0, 0],
+        [0, 6],
+        [0, 0],
+        [0, 1],
+        [0, 36],
+        [36, 6],
+        [36, 0],
+        [36, 1],
+        [36, 0]
+      ]
+    },
+    "5": {
+      "count": 8320,
+      "sha256_big_endian_uint16_pairs": "b5429872c595bab3937da8ddc2cdedb70ff840009f513c8618385dfdf4549702",
+      "first_12": [
+        [1, 0],
+        [1, 5],
+        [1, 0],
+        [1, 43],
+        [1, 0],
+        [0, 1],
+        [0, 5],
+        [0, 0],
+        [0, 43],
+        [0, 0],
+        [0, 16],
+        [5, 1]
+      ],
+      "last_12": [
+        [1, 36],
+        [0, 191],
+        [0, 0],
+        [0, 6],
+        [0, 0],
+        [0, 1],
+        [0, 36],
+        [36, 0],
+        [36, 6],
+        [36, 0],
+        [36, 1],
+        [36, 0]
+      ]
+    }
+  }
+}

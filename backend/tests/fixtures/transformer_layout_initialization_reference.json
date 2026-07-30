@@ -1,0 +1,2551 @@
+{
+  "provenance": {
+    "source": "Independent standard-library scalar reference transcribed from the supplied TypeScript transformer.ts and weight-layout.ts behavior.",
+    "production_imports": [],
+    "notes": [
+      "This generator imports no how_llms_work production module.",
+      "Every Xavier draw is packed immediately as little-endian IEEE-754 float32.",
+      "Checksums cover the complete canonical flat float32 byte sequence."
+    ]
+  },
+  "architecture": {
+    "vocabulary_size": 392,
+    "context_length": 32,
+    "embedding_dimension": 32,
+    "attention_head_count": 2,
+    "head_dimension": 16,
+    "feed_forward_dimension": 128,
+    "supported_layer_counts": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "initialization_seed": 42,
+    "float_itemsize": 4
+  },
+  "shared_key_order": [
+    "tokEmb",
+    "posEmb"
+  ],
+  "block_key_order": [
+    "ln1Gamma",
+    "ln1Beta",
+    "wQ",
+    "bQ",
+    "wK",
+    "bK",
+    "wV",
+    "bV",
+    "wO",
+    "bO",
+    "ln2Gamma",
+    "ln2Beta",
+    "ff1W",
+    "ff1B",
+    "ff2W",
+    "ff2B"
+  ],
+  "head_key_order": [
+    "lnFGamma",
+    "lnFBeta",
+    "headW",
+    "headB"
+  ],
+  "layer_summaries": {
+    "1": {
+      "record_count": 22,
+      "total_float_count": 39272,
+      "total_byte_count": 157088,
+      "random_draw_count": 38400,
+      "final_generator_state": 2037747242
+    },
+    "2": {
+      "record_count": 38,
+      "total_float_count": 51976,
+      "total_byte_count": 207904,
+      "random_draw_count": 50688,
+      "final_generator_state": 2689826346
+    },
+    "3": {
+      "record_count": 54,
+      "total_float_count": 64680,
+      "total_byte_count": 258720,
+      "random_draw_count": 62976,
+      "final_generator_state": 3341905450
+    },
+    "4": {
+      "record_count": 70,
+      "total_float_count": 77384,
+      "total_byte_count": 309536,
+      "random_draw_count": 75264,
+      "final_generator_state": 3993984554
+    },
+    "5": {
+      "record_count": 86,
+      "total_float_count": 90088,
+      "total_byte_count": 360352,
+      "random_draw_count": 87552,
+      "final_generator_state": 351096362
+    },
+    "6": {
+      "record_count": 102,
+      "total_float_count": 102792,
+      "total_byte_count": 411168,
+      "random_draw_count": 99840,
+      "final_generator_state": 1003175466
+    }
+  },
+  "representative_layouts": {
+    "1": [
+      {
+        "key": "tokEmb",
+        "block_index": null,
+        "float_offset": 0,
+        "byte_offset": 0,
+        "length": 12544,
+        "shape": [
+          392,
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "posEmb",
+        "block_index": null,
+        "float_offset": 12544,
+        "byte_offset": 50176,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "ln1Gamma",
+        "block_index": 0,
+        "float_offset": 13568,
+        "byte_offset": 54272,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "ln1Beta",
+        "block_index": 0,
+        "float_offset": 13600,
+        "byte_offset": 54400,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "wQ",
+        "block_index": 0,
+        "float_offset": 13632,
+        "byte_offset": 54528,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "bQ",
+        "block_index": 0,
+        "float_offset": 14656,
+        "byte_offset": 58624,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "wK",
+        "block_index": 0,
+        "float_offset": 14688,
+        "byte_offset": 58752,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "bK",
+        "block_index": 0,
+        "float_offset": 15712,
+        "byte_offset": 62848,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "wV",
+        "block_index": 0,
+        "float_offset": 15744,
+        "byte_offset": 62976,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "bV",
+        "block_index": 0,
+        "float_offset": 16768,
+        "byte_offset": 67072,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "wO",
+        "block_index": 0,
+        "float_offset": 16800,
+        "byte_offset": 67200,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "bO",
+        "block_index": 0,
+        "float_offset": 17824,
+        "byte_offset": 71296,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "ln2Gamma",
+        "block_index": 0,
+        "float_offset": 17856,
+        "byte_offset": 71424,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "ln2Beta",
+        "block_index": 0,
+        "float_offset": 17888,
+        "byte_offset": 71552,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "ff1W",
+        "block_index": 0,
+        "float_offset": 17920,
+        "byte_offset": 71680,
+        "length": 4096,
+        "shape": [
+          32,
+          128
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "ff1B",
+        "block_index": 0,
+        "float_offset": 22016,
+        "byte_offset": 88064,
+        "length": 128,
+        "shape": [
+          128
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "ff2W",
+        "block_index": 0,
+        "float_offset": 22144,
+        "byte_offset": 88576,
+        "length": 4096,
+        "shape": [
+          128,
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "ff2B",
+        "block_index": 0,
+        "float_offset": 26240,
+        "byte_offset": 104960,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "lnFGamma",
+        "block_index": null,
+        "float_offset": 26272,
+        "byte_offset": 105088,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "lnFBeta",
+        "block_index": null,
+        "float_offset": 26304,
+        "byte_offset": 105216,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "headW",
+        "block_index": null,
+        "float_offset": 26336,
+        "byte_offset": 105344,
+        "length": 12544,
+        "shape": [
+          32,
+          392
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      },
+      {
+        "key": "headB",
+        "block_index": null,
+        "float_offset": 38880,
+        "byte_offset": 155520,
+        "length": 392,
+        "shape": [
+          392
+        ],
+        "total_float_count": 39272,
+        "total_byte_count": 157088
+      }
+    ],
+    "2": [
+      {
+        "key": "tokEmb",
+        "block_index": null,
+        "float_offset": 0,
+        "byte_offset": 0,
+        "length": 12544,
+        "shape": [
+          392,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "posEmb",
+        "block_index": null,
+        "float_offset": 12544,
+        "byte_offset": 50176,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ln1Gamma",
+        "block_index": 0,
+        "float_offset": 13568,
+        "byte_offset": 54272,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ln1Beta",
+        "block_index": 0,
+        "float_offset": 13600,
+        "byte_offset": 54400,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "wQ",
+        "block_index": 0,
+        "float_offset": 13632,
+        "byte_offset": 54528,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "bQ",
+        "block_index": 0,
+        "float_offset": 14656,
+        "byte_offset": 58624,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "wK",
+        "block_index": 0,
+        "float_offset": 14688,
+        "byte_offset": 58752,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "bK",
+        "block_index": 0,
+        "float_offset": 15712,
+        "byte_offset": 62848,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "wV",
+        "block_index": 0,
+        "float_offset": 15744,
+        "byte_offset": 62976,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "bV",
+        "block_index": 0,
+        "float_offset": 16768,
+        "byte_offset": 67072,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "wO",
+        "block_index": 0,
+        "float_offset": 16800,
+        "byte_offset": 67200,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "bO",
+        "block_index": 0,
+        "float_offset": 17824,
+        "byte_offset": 71296,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ln2Gamma",
+        "block_index": 0,
+        "float_offset": 17856,
+        "byte_offset": 71424,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ln2Beta",
+        "block_index": 0,
+        "float_offset": 17888,
+        "byte_offset": 71552,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ff1W",
+        "block_index": 0,
+        "float_offset": 17920,
+        "byte_offset": 71680,
+        "length": 4096,
+        "shape": [
+          32,
+          128
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ff1B",
+        "block_index": 0,
+        "float_offset": 22016,
+        "byte_offset": 88064,
+        "length": 128,
+        "shape": [
+          128
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ff2W",
+        "block_index": 0,
+        "float_offset": 22144,
+        "byte_offset": 88576,
+        "length": 4096,
+        "shape": [
+          128,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ff2B",
+        "block_index": 0,
+        "float_offset": 26240,
+        "byte_offset": 104960,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ln1Gamma",
+        "block_index": 1,
+        "float_offset": 26272,
+        "byte_offset": 105088,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ln1Beta",
+        "block_index": 1,
+        "float_offset": 26304,
+        "byte_offset": 105216,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "wQ",
+        "block_index": 1,
+        "float_offset": 26336,
+        "byte_offset": 105344,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "bQ",
+        "block_index": 1,
+        "float_offset": 27360,
+        "byte_offset": 109440,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "wK",
+        "block_index": 1,
+        "float_offset": 27392,
+        "byte_offset": 109568,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "bK",
+        "block_index": 1,
+        "float_offset": 28416,
+        "byte_offset": 113664,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "wV",
+        "block_index": 1,
+        "float_offset": 28448,
+        "byte_offset": 113792,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "bV",
+        "block_index": 1,
+        "float_offset": 29472,
+        "byte_offset": 117888,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "wO",
+        "block_index": 1,
+        "float_offset": 29504,
+        "byte_offset": 118016,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "bO",
+        "block_index": 1,
+        "float_offset": 30528,
+        "byte_offset": 122112,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ln2Gamma",
+        "block_index": 1,
+        "float_offset": 30560,
+        "byte_offset": 122240,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ln2Beta",
+        "block_index": 1,
+        "float_offset": 30592,
+        "byte_offset": 122368,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ff1W",
+        "block_index": 1,
+        "float_offset": 30624,
+        "byte_offset": 122496,
+        "length": 4096,
+        "shape": [
+          32,
+          128
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ff1B",
+        "block_index": 1,
+        "float_offset": 34720,
+        "byte_offset": 138880,
+        "length": 128,
+        "shape": [
+          128
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ff2W",
+        "block_index": 1,
+        "float_offset": 34848,
+        "byte_offset": 139392,
+        "length": 4096,
+        "shape": [
+          128,
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "ff2B",
+        "block_index": 1,
+        "float_offset": 38944,
+        "byte_offset": 155776,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "lnFGamma",
+        "block_index": null,
+        "float_offset": 38976,
+        "byte_offset": 155904,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "lnFBeta",
+        "block_index": null,
+        "float_offset": 39008,
+        "byte_offset": 156032,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "headW",
+        "block_index": null,
+        "float_offset": 39040,
+        "byte_offset": 156160,
+        "length": 12544,
+        "shape": [
+          32,
+          392
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      },
+      {
+        "key": "headB",
+        "block_index": null,
+        "float_offset": 51584,
+        "byte_offset": 206336,
+        "length": 392,
+        "shape": [
+          392
+        ],
+        "total_float_count": 51976,
+        "total_byte_count": 207904
+      }
+    ],
+    "6": [
+      {
+        "key": "tokEmb",
+        "block_index": null,
+        "float_offset": 0,
+        "byte_offset": 0,
+        "length": 12544,
+        "shape": [
+          392,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "posEmb",
+        "block_index": null,
+        "float_offset": 12544,
+        "byte_offset": 50176,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Gamma",
+        "block_index": 0,
+        "float_offset": 13568,
+        "byte_offset": 54272,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Beta",
+        "block_index": 0,
+        "float_offset": 13600,
+        "byte_offset": 54400,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wQ",
+        "block_index": 0,
+        "float_offset": 13632,
+        "byte_offset": 54528,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bQ",
+        "block_index": 0,
+        "float_offset": 14656,
+        "byte_offset": 58624,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wK",
+        "block_index": 0,
+        "float_offset": 14688,
+        "byte_offset": 58752,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bK",
+        "block_index": 0,
+        "float_offset": 15712,
+        "byte_offset": 62848,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wV",
+        "block_index": 0,
+        "float_offset": 15744,
+        "byte_offset": 62976,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bV",
+        "block_index": 0,
+        "float_offset": 16768,
+        "byte_offset": 67072,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wO",
+        "block_index": 0,
+        "float_offset": 16800,
+        "byte_offset": 67200,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bO",
+        "block_index": 0,
+        "float_offset": 17824,
+        "byte_offset": 71296,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Gamma",
+        "block_index": 0,
+        "float_offset": 17856,
+        "byte_offset": 71424,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Beta",
+        "block_index": 0,
+        "float_offset": 17888,
+        "byte_offset": 71552,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1W",
+        "block_index": 0,
+        "float_offset": 17920,
+        "byte_offset": 71680,
+        "length": 4096,
+        "shape": [
+          32,
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1B",
+        "block_index": 0,
+        "float_offset": 22016,
+        "byte_offset": 88064,
+        "length": 128,
+        "shape": [
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2W",
+        "block_index": 0,
+        "float_offset": 22144,
+        "byte_offset": 88576,
+        "length": 4096,
+        "shape": [
+          128,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2B",
+        "block_index": 0,
+        "float_offset": 26240,
+        "byte_offset": 104960,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Gamma",
+        "block_index": 1,
+        "float_offset": 26272,
+        "byte_offset": 105088,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Beta",
+        "block_index": 1,
+        "float_offset": 26304,
+        "byte_offset": 105216,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wQ",
+        "block_index": 1,
+        "float_offset": 26336,
+        "byte_offset": 105344,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bQ",
+        "block_index": 1,
+        "float_offset": 27360,
+        "byte_offset": 109440,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wK",
+        "block_index": 1,
+        "float_offset": 27392,
+        "byte_offset": 109568,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bK",
+        "block_index": 1,
+        "float_offset": 28416,
+        "byte_offset": 113664,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wV",
+        "block_index": 1,
+        "float_offset": 28448,
+        "byte_offset": 113792,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bV",
+        "block_index": 1,
+        "float_offset": 29472,
+        "byte_offset": 117888,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wO",
+        "block_index": 1,
+        "float_offset": 29504,
+        "byte_offset": 118016,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bO",
+        "block_index": 1,
+        "float_offset": 30528,
+        "byte_offset": 122112,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Gamma",
+        "block_index": 1,
+        "float_offset": 30560,
+        "byte_offset": 122240,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Beta",
+        "block_index": 1,
+        "float_offset": 30592,
+        "byte_offset": 122368,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1W",
+        "block_index": 1,
+        "float_offset": 30624,
+        "byte_offset": 122496,
+        "length": 4096,
+        "shape": [
+          32,
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1B",
+        "block_index": 1,
+        "float_offset": 34720,
+        "byte_offset": 138880,
+        "length": 128,
+        "shape": [
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2W",
+        "block_index": 1,
+        "float_offset": 34848,
+        "byte_offset": 139392,
+        "length": 4096,
+        "shape": [
+          128,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2B",
+        "block_index": 1,
+        "float_offset": 38944,
+        "byte_offset": 155776,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Gamma",
+        "block_index": 2,
+        "float_offset": 38976,
+        "byte_offset": 155904,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Beta",
+        "block_index": 2,
+        "float_offset": 39008,
+        "byte_offset": 156032,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wQ",
+        "block_index": 2,
+        "float_offset": 39040,
+        "byte_offset": 156160,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bQ",
+        "block_index": 2,
+        "float_offset": 40064,
+        "byte_offset": 160256,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wK",
+        "block_index": 2,
+        "float_offset": 40096,
+        "byte_offset": 160384,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bK",
+        "block_index": 2,
+        "float_offset": 41120,
+        "byte_offset": 164480,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wV",
+        "block_index": 2,
+        "float_offset": 41152,
+        "byte_offset": 164608,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bV",
+        "block_index": 2,
+        "float_offset": 42176,
+        "byte_offset": 168704,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wO",
+        "block_index": 2,
+        "float_offset": 42208,
+        "byte_offset": 168832,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bO",
+        "block_index": 2,
+        "float_offset": 43232,
+        "byte_offset": 172928,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Gamma",
+        "block_index": 2,
+        "float_offset": 43264,
+        "byte_offset": 173056,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Beta",
+        "block_index": 2,
+        "float_offset": 43296,
+        "byte_offset": 173184,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1W",
+        "block_index": 2,
+        "float_offset": 43328,
+        "byte_offset": 173312,
+        "length": 4096,
+        "shape": [
+          32,
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1B",
+        "block_index": 2,
+        "float_offset": 47424,
+        "byte_offset": 189696,
+        "length": 128,
+        "shape": [
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2W",
+        "block_index": 2,
+        "float_offset": 47552,
+        "byte_offset": 190208,
+        "length": 4096,
+        "shape": [
+          128,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2B",
+        "block_index": 2,
+        "float_offset": 51648,
+        "byte_offset": 206592,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Gamma",
+        "block_index": 3,
+        "float_offset": 51680,
+        "byte_offset": 206720,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Beta",
+        "block_index": 3,
+        "float_offset": 51712,
+        "byte_offset": 206848,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wQ",
+        "block_index": 3,
+        "float_offset": 51744,
+        "byte_offset": 206976,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bQ",
+        "block_index": 3,
+        "float_offset": 52768,
+        "byte_offset": 211072,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wK",
+        "block_index": 3,
+        "float_offset": 52800,
+        "byte_offset": 211200,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bK",
+        "block_index": 3,
+        "float_offset": 53824,
+        "byte_offset": 215296,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wV",
+        "block_index": 3,
+        "float_offset": 53856,
+        "byte_offset": 215424,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bV",
+        "block_index": 3,
+        "float_offset": 54880,
+        "byte_offset": 219520,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wO",
+        "block_index": 3,
+        "float_offset": 54912,
+        "byte_offset": 219648,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bO",
+        "block_index": 3,
+        "float_offset": 55936,
+        "byte_offset": 223744,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Gamma",
+        "block_index": 3,
+        "float_offset": 55968,
+        "byte_offset": 223872,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Beta",
+        "block_index": 3,
+        "float_offset": 56000,
+        "byte_offset": 224000,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1W",
+        "block_index": 3,
+        "float_offset": 56032,
+        "byte_offset": 224128,
+        "length": 4096,
+        "shape": [
+          32,
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1B",
+        "block_index": 3,
+        "float_offset": 60128,
+        "byte_offset": 240512,
+        "length": 128,
+        "shape": [
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2W",
+        "block_index": 3,
+        "float_offset": 60256,
+        "byte_offset": 241024,
+        "length": 4096,
+        "shape": [
+          128,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2B",
+        "block_index": 3,
+        "float_offset": 64352,
+        "byte_offset": 257408,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Gamma",
+        "block_index": 4,
+        "float_offset": 64384,
+        "byte_offset": 257536,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Beta",
+        "block_index": 4,
+        "float_offset": 64416,
+        "byte_offset": 257664,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wQ",
+        "block_index": 4,
+        "float_offset": 64448,
+        "byte_offset": 257792,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bQ",
+        "block_index": 4,
+        "float_offset": 65472,
+        "byte_offset": 261888,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wK",
+        "block_index": 4,
+        "float_offset": 65504,
+        "byte_offset": 262016,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bK",
+        "block_index": 4,
+        "float_offset": 66528,
+        "byte_offset": 266112,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wV",
+        "block_index": 4,
+        "float_offset": 66560,
+        "byte_offset": 266240,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bV",
+        "block_index": 4,
+        "float_offset": 67584,
+        "byte_offset": 270336,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wO",
+        "block_index": 4,
+        "float_offset": 67616,
+        "byte_offset": 270464,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bO",
+        "block_index": 4,
+        "float_offset": 68640,
+        "byte_offset": 274560,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Gamma",
+        "block_index": 4,
+        "float_offset": 68672,
+        "byte_offset": 274688,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Beta",
+        "block_index": 4,
+        "float_offset": 68704,
+        "byte_offset": 274816,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1W",
+        "block_index": 4,
+        "float_offset": 68736,
+        "byte_offset": 274944,
+        "length": 4096,
+        "shape": [
+          32,
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1B",
+        "block_index": 4,
+        "float_offset": 72832,
+        "byte_offset": 291328,
+        "length": 128,
+        "shape": [
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2W",
+        "block_index": 4,
+        "float_offset": 72960,
+        "byte_offset": 291840,
+        "length": 4096,
+        "shape": [
+          128,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2B",
+        "block_index": 4,
+        "float_offset": 77056,
+        "byte_offset": 308224,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Gamma",
+        "block_index": 5,
+        "float_offset": 77088,
+        "byte_offset": 308352,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln1Beta",
+        "block_index": 5,
+        "float_offset": 77120,
+        "byte_offset": 308480,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wQ",
+        "block_index": 5,
+        "float_offset": 77152,
+        "byte_offset": 308608,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bQ",
+        "block_index": 5,
+        "float_offset": 78176,
+        "byte_offset": 312704,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wK",
+        "block_index": 5,
+        "float_offset": 78208,
+        "byte_offset": 312832,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bK",
+        "block_index": 5,
+        "float_offset": 79232,
+        "byte_offset": 316928,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wV",
+        "block_index": 5,
+        "float_offset": 79264,
+        "byte_offset": 317056,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bV",
+        "block_index": 5,
+        "float_offset": 80288,
+        "byte_offset": 321152,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "wO",
+        "block_index": 5,
+        "float_offset": 80320,
+        "byte_offset": 321280,
+        "length": 1024,
+        "shape": [
+          32,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "bO",
+        "block_index": 5,
+        "float_offset": 81344,
+        "byte_offset": 325376,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Gamma",
+        "block_index": 5,
+        "float_offset": 81376,
+        "byte_offset": 325504,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ln2Beta",
+        "block_index": 5,
+        "float_offset": 81408,
+        "byte_offset": 325632,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1W",
+        "block_index": 5,
+        "float_offset": 81440,
+        "byte_offset": 325760,
+        "length": 4096,
+        "shape": [
+          32,
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff1B",
+        "block_index": 5,
+        "float_offset": 85536,
+        "byte_offset": 342144,
+        "length": 128,
+        "shape": [
+          128
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2W",
+        "block_index": 5,
+        "float_offset": 85664,
+        "byte_offset": 342656,
+        "length": 4096,
+        "shape": [
+          128,
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "ff2B",
+        "block_index": 5,
+        "float_offset": 89760,
+        "byte_offset": 359040,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "lnFGamma",
+        "block_index": null,
+        "float_offset": 89792,
+        "byte_offset": 359168,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "lnFBeta",
+        "block_index": null,
+        "float_offset": 89824,
+        "byte_offset": 359296,
+        "length": 32,
+        "shape": [
+          32
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "headW",
+        "block_index": null,
+        "float_offset": 89856,
+        "byte_offset": 359424,
+        "length": 12544,
+        "shape": [
+          32,
+          392
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      },
+      {
+        "key": "headB",
+        "block_index": null,
+        "float_offset": 102400,
+        "byte_offset": 409600,
+        "length": 392,
+        "shape": [
+          392
+        ],
+        "total_float_count": 102792,
+        "total_byte_count": 411168
+      }
+    ]
+  },
+  "deterministic_fills": {
+    "gamma_keys": [
+      "ln1Gamma",
+      "ln2Gamma",
+      "lnFGamma"
+    ],
+    "one_bits_le": "0000803f",
+    "zero_keys": [
+      "ln1Beta",
+      "bQ",
+      "bK",
+      "bV",
+      "bO",
+      "ln2Beta",
+      "ff1B",
+      "ff2B",
+      "lnFBeta",
+      "headB"
+    ],
+    "zero_bits_le": "00000000"
+  },
+  "initialization": {
+    "seed": 42,
+    "layers": {
+      "1": {
+        "draw_count": 38400,
+        "final_generator_state": 2037747242,
+        "sha256_le_float32": "50b28a2a8226bfd984728fd2c7620c2d27a61d1d355871b68327a563cf031ed7",
+        "landmarks": [
+          {
+            "key": "wQ",
+            "block_index": 0,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 13632,
+            "value_bits_le": "a5987d3d"
+          },
+          {
+            "key": "wQ",
+            "block_index": 0,
+            "index": [
+              31,
+              31
+            ],
+            "flat_offset": 14655,
+            "value_bits_le": "8c9993be"
+          },
+          {
+            "key": "wK",
+            "block_index": 0,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 14688,
+            "value_bits_le": "f85729ba"
+          },
+          {
+            "key": "wV",
+            "block_index": 0,
+            "index": [
+              7,
+              11
+            ],
+            "flat_offset": 15979,
+            "value_bits_le": "24504fbc"
+          },
+          {
+            "key": "wO",
+            "block_index": 0,
+            "index": [
+              31,
+              31
+            ],
+            "flat_offset": 17823,
+            "value_bits_le": "6c117dbe"
+          },
+          {
+            "key": "ff1W",
+            "block_index": 0,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 17920,
+            "value_bits_le": "6fe1ea3d"
+          },
+          {
+            "key": "ff1W",
+            "block_index": 0,
+            "index": [
+              31,
+              127
+            ],
+            "flat_offset": 22015,
+            "value_bits_le": "c6cb2abe"
+          },
+          {
+            "key": "ff2W",
+            "block_index": 0,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 22144,
+            "value_bits_le": "ddf4fe3d"
+          },
+          {
+            "key": "ff2W",
+            "block_index": 0,
+            "index": [
+              127,
+              31
+            ],
+            "flat_offset": 26239,
+            "value_bits_le": "2bd906bd"
+          },
+          {
+            "key": "tokEmb",
+            "block_index": null,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 0,
+            "value_bits_le": "920ec9bd"
+          },
+          {
+            "key": "tokEmb",
+            "block_index": null,
+            "index": [
+              391,
+              31
+            ],
+            "flat_offset": 12543,
+            "value_bits_le": "4c077e3d"
+          },
+          {
+            "key": "posEmb",
+            "block_index": null,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 12544,
+            "value_bits_le": "211a7939"
+          },
+          {
+            "key": "posEmb",
+            "block_index": null,
+            "index": [
+              31,
+              31
+            ],
+            "flat_offset": 13567,
+            "value_bits_le": "68b0503e"
+          },
+          {
+            "key": "headW",
+            "block_index": null,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 26336,
+            "value_bits_le": "4b246abd"
+          },
+          {
+            "key": "headW",
+            "block_index": null,
+            "index": [
+              31,
+              391
+            ],
+            "flat_offset": 38879,
+            "value_bits_le": "3c77843d"
+          }
+        ]
+      },
+      "2": {
+        "draw_count": 50688,
+        "final_generator_state": 2689826346,
+        "sha256_le_float32": "a6252da7029b9b91dddaa0583ca4e27e007c7264b0b1b4b746668fd7a9c585c7",
+        "landmarks": [
+          {
+            "key": "wQ",
+            "block_index": 0,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 13632,
+            "value_bits_le": "a5987d3d"
+          },
+          {
+            "key": "ff2W",
+            "block_index": 0,
+            "index": [
+              127,
+              31
+            ],
+            "flat_offset": 26239,
+            "value_bits_le": "2bd906bd"
+          },
+          {
+            "key": "wQ",
+            "block_index": 1,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 26336,
+            "value_bits_le": "1f6081be"
+          },
+          {
+            "key": "wK",
+            "block_index": 1,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 27392,
+            "value_bits_le": "77aa583e"
+          },
+          {
+            "key": "ff1W",
+            "block_index": 1,
+            "index": [
+              31,
+              127
+            ],
+            "flat_offset": 34719,
+            "value_bits_le": "e1e3b3bc"
+          },
+          {
+            "key": "ff2W",
+            "block_index": 1,
+            "index": [
+              127,
+              31
+            ],
+            "flat_offset": 38943,
+            "value_bits_le": "f6ea23be"
+          },
+          {
+            "key": "tokEmb",
+            "block_index": null,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 0,
+            "value_bits_le": "b863d73c"
+          },
+          {
+            "key": "posEmb",
+            "block_index": null,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 12544,
+            "value_bits_le": "4772863e"
+          },
+          {
+            "key": "headW",
+            "block_index": null,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 39040,
+            "value_bits_le": "5a80da3c"
+          },
+          {
+            "key": "headW",
+            "block_index": null,
+            "index": [
+              31,
+              391
+            ],
+            "flat_offset": 51583,
+            "value_bits_le": "97e5383d"
+          }
+        ]
+      },
+      "3": {
+        "draw_count": 62976,
+        "final_generator_state": 3341905450,
+        "sha256_le_float32": "a3da6752ae46321bb7f17bc62bad1e5bbe443f4eb987ff3948bd6b94cf42453d",
+        "landmarks": []
+      },
+      "4": {
+        "draw_count": 75264,
+        "final_generator_state": 3993984554,
+        "sha256_le_float32": "c12e1fdb15885f38d3384c22b4c2debd130d876f4710a283dc4c878560528ca4",
+        "landmarks": []
+      },
+      "5": {
+        "draw_count": 87552,
+        "final_generator_state": 351096362,
+        "sha256_le_float32": "6a7c27863dcab72ced3e98174fa4361391cc6133b1b13de8fa04cbdb32df69f3",
+        "landmarks": []
+      },
+      "6": {
+        "draw_count": 99840,
+        "final_generator_state": 1003175466,
+        "sha256_le_float32": "2a88d454d7cb2af1ea4222bdad4678adcdc90b609eaf3cb939290f5e31029583",
+        "landmarks": [
+          {
+            "key": "wQ",
+            "block_index": 0,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 13632,
+            "value_bits_le": "a5987d3d"
+          },
+          {
+            "key": "ff2W",
+            "block_index": 0,
+            "index": [
+              127,
+              31
+            ],
+            "flat_offset": 26239,
+            "value_bits_le": "2bd906bd"
+          },
+          {
+            "key": "wQ",
+            "block_index": 1,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 26336,
+            "value_bits_le": "1f6081be"
+          },
+          {
+            "key": "wQ",
+            "block_index": 5,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 77152,
+            "value_bits_le": "e0266cbe"
+          },
+          {
+            "key": "wK",
+            "block_index": 5,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 78208,
+            "value_bits_le": "911c97be"
+          },
+          {
+            "key": "ff1W",
+            "block_index": 5,
+            "index": [
+              31,
+              127
+            ],
+            "flat_offset": 85535,
+            "value_bits_le": "4a2e81bd"
+          },
+          {
+            "key": "ff2W",
+            "block_index": 5,
+            "index": [
+              127,
+              31
+            ],
+            "flat_offset": 89759,
+            "value_bits_le": "5ac5a4bd"
+          },
+          {
+            "key": "tokEmb",
+            "block_index": null,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 0,
+            "value_bits_le": "b356eb3d"
+          },
+          {
+            "key": "tokEmb",
+            "block_index": null,
+            "index": [
+              391,
+              31
+            ],
+            "flat_offset": 12543,
+            "value_bits_le": "9a5e4fbc"
+          },
+          {
+            "key": "posEmb",
+            "block_index": null,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 12544,
+            "value_bits_le": "26e0963e"
+          },
+          {
+            "key": "headW",
+            "block_index": null,
+            "index": [
+              0,
+              0
+            ],
+            "flat_offset": 89856,
+            "value_bits_le": "ea722c3d"
+          },
+          {
+            "key": "headW",
+            "block_index": null,
+            "index": [
+              31,
+              391
+            ],
+            "flat_offset": 102399,
+            "value_bits_le": "6e391c3d"
+          }
+        ]
+      }
+    }
+  }
+}
