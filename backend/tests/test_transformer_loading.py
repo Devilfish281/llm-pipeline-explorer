@@ -105,6 +105,27 @@ def _serialize_model(model: SavedTransformerModel) -> bytes:
     return f"{document}\n".encode("utf-8")
 
 
+def _write_model_candidate(
+    model_directory: Path,
+    model_filename: str,
+    model: SavedTransformerModel,
+    *,
+    modification_time_ns: int,
+) -> Path:
+    """Write one canonical candidate and assign controlled ordering metadata."""
+    path = model_directory / model_filename
+    path.write_bytes(_serialize_model(model))
+    metadata = path.stat()
+    os.utime(
+        path,
+        ns=(
+            metadata.st_atime_ns,
+            modification_time_ns,
+        ),
+    )
+    return path
+
+
 def _write_json_value(
     path: Path,
     value: object,
@@ -201,6 +222,10 @@ def _create_windows_junction_or_skip(
 
 def _load_named_model(model_filename: str) -> Any:
     return train_transformer_route.load_named_transformer_model(model_filename)
+
+
+def _load_latest_model() -> Any:
+    return train_transformer_route.load_latest_transformer_model()
 
 
 def _assert_public_load_rejection(
@@ -1429,3 +1454,301 @@ def test_named_loading_rejects_nested_duplicate_json_object_keys_without_mutatio
         _CANONICAL_MODEL_FILENAME,
         saved_model_path,
     )
+
+
+def test_latest_loading_selects_newest_approved_direct_candidate_and_ignores_noise(
+    model_directory: Path,
+    saved_transformer_model: SavedTransformerModel,
+) -> None:
+    older_filename = "transformer-weights-e50-l1-d32-h2-ff128-ctx32.json"
+    newer_filename = "transformer-weights-e100-l1-d32-h2-ff128-ctx32.json"
+    directory_filename = "transformer-weights-e200-l1-d32-h2-ff128-ctx32.json"
+
+    older_path = _write_model_candidate(
+        model_directory,
+        older_filename,
+        saved_transformer_model,
+        modification_time_ns=1_700_000_000_000_000_100,
+    )
+    newer_path = _write_model_candidate(
+        model_directory,
+        newer_filename,
+        saved_transformer_model,
+        modification_time_ns=1_700_000_000_000_000_300,
+    )
+
+    noncanonical_path = model_directory / "transformer-weights-latest.json"
+    noncanonical_path.write_bytes(_serialize_model(saved_transformer_model))
+    noncanonical_metadata = noncanonical_path.stat()
+    os.utime(
+        noncanonical_path,
+        ns=(
+            noncanonical_metadata.st_atime_ns,
+            1_700_000_000_000_000_500,
+        ),
+    )
+
+    directory_path = model_directory / directory_filename
+    directory_path.mkdir()
+    directory_metadata = directory_path.stat()
+    os.utime(
+        directory_path,
+        ns=(
+            directory_metadata.st_atime_ns,
+            1_700_000_000_000_000_400,
+        ),
+    )
+
+    before = {
+        older_path: _artifact_state(older_path),
+        newer_path: _artifact_state(newer_path),
+        noncanonical_path: _artifact_state(noncanonical_path),
+    }
+    before_entries = tuple(sorted(entry.name for entry in model_directory.iterdir()))
+
+    loaded = _load_latest_model()
+
+    assert loaded.model_filename == newer_filename
+    assert tuple(sorted(entry.name for entry in model_directory.iterdir())) == before_entries
+
+    for path, expected_state in before.items():
+        assert _artifact_state(path) == expected_state
+
+    assert directory_path.is_dir()
+
+
+def test_latest_loading_skips_newest_invalid_candidate_and_returns_older_valid_model(
+    model_directory: Path,
+    saved_transformer_model: SavedTransformerModel,
+) -> None:
+    valid_filename = "transformer-weights-e100-l1-d32-h2-ff128-ctx32.json"
+    invalid_filename = "transformer-weights-e200-l1-d32-h2-ff128-ctx32.json"
+
+    valid_path = _write_model_candidate(
+        model_directory,
+        valid_filename,
+        saved_transformer_model,
+        modification_time_ns=1_700_000_000_000_000_100,
+    )
+    invalid_path = model_directory / invalid_filename
+    invalid_path.write_bytes(b'{"type":"decoder-transformer","config":')
+    invalid_metadata = invalid_path.stat()
+    os.utime(
+        invalid_path,
+        ns=(
+            invalid_metadata.st_atime_ns,
+            1_700_000_000_000_000_200,
+        ),
+    )
+
+    before = {
+        valid_path: _artifact_state(valid_path),
+        invalid_path: _artifact_state(invalid_path),
+    }
+
+    loaded = _load_latest_model()
+
+    assert loaded.model_filename == valid_filename
+
+    for path, expected_state in before.items():
+        assert _artifact_state(path) == expected_state
+
+
+def test_latest_loading_breaks_equal_mtime_ties_by_descending_exact_filename(
+    model_directory: Path,
+    saved_transformer_model: SavedTransformerModel,
+) -> None:
+    lower_filename = "transformer-weights-e800-l1-d32-h2-ff128-ctx32.json"
+    greater_filename = "transformer-weights-e900-l1-d32-h2-ff128-ctx32.json"
+    tied_mtime_ns = 1_700_000_000_000_000_000
+
+    greater_path = _write_model_candidate(
+        model_directory,
+        greater_filename,
+        saved_transformer_model,
+        modification_time_ns=tied_mtime_ns,
+    )
+    lower_path = _write_model_candidate(
+        model_directory,
+        lower_filename,
+        saved_transformer_model,
+        modification_time_ns=tied_mtime_ns,
+    )
+
+    assert greater_path.stat().st_mtime_ns == lower_path.stat().st_mtime_ns
+
+    before = {
+        greater_path: _artifact_state(greater_path),
+        lower_path: _artifact_state(lower_path),
+    }
+
+    first = _load_latest_model()
+    second = _load_latest_model()
+
+    assert first.model_filename == greater_filename
+    assert second.model_filename == greater_filename
+    assert not np.shares_memory(
+        first.parameters.storage,
+        second.parameters.storage,
+    )
+
+    for path, expected_state in before.items():
+        assert _artifact_state(path) == expected_state
+
+
+def test_latest_loading_reports_one_sanitized_failure_when_no_valid_model_exists(
+    model_directory: Path,
+    saved_transformer_model: SavedTransformerModel,
+) -> None:
+    malformed_path = model_directory / ("transformer-weights-e100-l1-d32-h2-ff128-ctx32.json")
+    malformed_path.write_bytes(b"not-json")
+
+    noncanonical_path = model_directory / "transformer-weights-current.json"
+    noncanonical_path.write_bytes(_serialize_model(saved_transformer_model))
+
+    directory_path = model_directory / ("transformer-weights-e200-l1-d32-h2-ff128-ctx32.json")
+    directory_path.mkdir()
+
+    before = {
+        malformed_path: _artifact_state(malformed_path),
+        noncanonical_path: _artifact_state(noncanonical_path),
+    }
+    before_entries = tuple(sorted(entry.name for entry in model_directory.iterdir()))
+
+    with pytest.raises(train_transformer_route.SavedTransformerModelLoadError) as captured:
+        _load_latest_model()
+
+    assert type(captured.value) is train_transformer_route.SavedTransformerModelLoadError
+    assert captured.value.args == (_PUBLIC_LOAD_FAILURE,)
+    assert str(captured.value) == _PUBLIC_LOAD_FAILURE
+    assert captured.value.__cause__ is None
+    assert captured.value.__suppress_context__
+    assert tuple(sorted(entry.name for entry in model_directory.iterdir())) == before_entries
+
+    for path, expected_state in before.items():
+        assert _artifact_state(path) == expected_state
+
+    assert directory_path.is_dir()
+
+
+def test_latest_loading_reads_selected_file_once_and_rereads_without_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    saved_model_path: Path,
+    saved_transformer_model: SavedTransformerModel,
+) -> None:
+    original_read_bytes = Path.read_bytes
+    original_value = np.float32(saved_transformer_model["weights"]["tokEmb"][0])
+
+    changed_model = cast(
+        SavedTransformerModel,
+        deepcopy(saved_transformer_model),
+    )
+    changed_value = float(changed_model["weights"]["tokEmb"][0]) + 0.5
+    changed_model["weights"]["tokEmb"][0] = changed_value
+    changed_bytes = _serialize_model(changed_model)
+
+    read_paths: list[Path] = []
+
+    def read_one_snapshot(path: Path) -> bytes:
+        read_paths.append(path)
+        document_bytes = original_read_bytes(path)
+
+        if path == saved_model_path and read_paths.count(saved_model_path) == 1:
+            saved_model_path.write_bytes(changed_bytes)
+
+        return document_bytes
+
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        read_one_snapshot,
+    )
+
+    first = _load_latest_model()
+
+    assert read_paths == [saved_model_path]
+    assert first.parameters.storage[0] == original_value
+    assert original_read_bytes(saved_model_path) == changed_bytes
+
+    second = _load_latest_model()
+
+    assert read_paths == [
+        saved_model_path,
+        saved_model_path,
+    ]
+    assert second.parameters.storage[0] == np.float32(changed_value)
+    assert second.parameters.storage[0] != first.parameters.storage[0]
+    assert not np.shares_memory(
+        first.parameters.storage,
+        second.parameters.storage,
+    )
+
+
+def test_latest_loading_skips_symbolic_link_candidate(
+    model_directory: Path,
+    saved_transformer_model: SavedTransformerModel,
+    tmp_path: Path,
+) -> None:
+    valid_filename = "transformer-weights-e100-l1-d32-h2-ff128-ctx32.json"
+    linked_filename = "transformer-weights-e200-l1-d32-h2-ff128-ctx32.json"
+
+    valid_path = _write_model_candidate(
+        model_directory,
+        valid_filename,
+        saved_transformer_model,
+        modification_time_ns=1_700_000_000_000_000_100,
+    )
+
+    outside_path = tmp_path / "outside-model.json"
+    outside_path.write_bytes(_serialize_model(saved_transformer_model))
+    outside_before = _artifact_state(outside_path)
+
+    link_path = model_directory / linked_filename
+    _create_symbolic_link_or_skip(
+        link_path,
+        outside_path,
+        target_is_directory=False,
+    )
+
+    valid_before = _artifact_state(valid_path)
+
+    loaded = _load_latest_model()
+
+    assert loaded.model_filename == valid_filename
+    assert link_path.is_symlink()
+    assert _artifact_state(valid_path) == valid_before
+    assert _artifact_state(outside_path) == outside_before
+
+
+def test_latest_loading_skips_real_windows_junction_candidate(
+    model_directory: Path,
+    saved_transformer_model: SavedTransformerModel,
+    tmp_path: Path,
+) -> None:
+    valid_filename = "transformer-weights-e100-l1-d32-h2-ff128-ctx32.json"
+    junction_filename = "transformer-weights-e200-l1-d32-h2-ff128-ctx32.json"
+
+    valid_path = _write_model_candidate(
+        model_directory,
+        valid_filename,
+        saved_transformer_model,
+        modification_time_ns=1_700_000_000_000_000_100,
+    )
+
+    target_directory = tmp_path / "junction-target"
+    target_directory.mkdir()
+
+    junction_path = model_directory / junction_filename
+    _create_windows_junction_or_skip(
+        junction_path,
+        target_directory,
+    )
+
+    valid_before = _artifact_state(valid_path)
+
+    loaded = _load_latest_model()
+
+    assert loaded.model_filename == valid_filename
+    assert junction_path.is_junction()
+    assert target_directory.is_dir()
+    assert _artifact_state(valid_path) == valid_before

@@ -708,6 +708,10 @@ This gives you a reference for comparing later runs.
 1000 0.8 0.9 6 20
 ```
 
+#### FILE: .data\transformer-weights-e1000-l6-d32-h2-ff128-ctx32.json
+
+transformer-weights-e1000-l6-d32-h2-ff128-ctx32.json
+
 ```text
 1000 1 0.6 6 3
 ```

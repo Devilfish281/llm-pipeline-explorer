@@ -97,3 +97,54 @@ class TrainTransformerRequest(BaseModel):
             le=500,
         ),
     ] = 40
+
+
+class LoadTransformerRequest(BaseModel):
+    """Strict public request for one named Saved Transformer Generation Run."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    model_file: Annotated[
+        str | None,
+        Field(
+            alias="modelFile",
+            strict=True,
+            min_length=1,
+        ),
+    ]
+
+    prompt: Annotated[
+        str,
+        Field(strict=True),
+    ]
+
+    temperature: Annotated[
+        float,
+        Field(
+            strict=True,
+            allow_inf_nan=False,
+            ge=0.1,
+            le=2.0,
+        ),
+    ]
+
+    top_p: Annotated[
+        float,
+        Field(
+            alias="topP",
+            strict=True,
+            allow_inf_nan=False,
+            ge=0.1,
+            le=1.0,
+        ),
+    ]
+
+    max_tokens: Annotated[
+        int,
+        Field(
+            alias="maxTokens",
+            strict=True,
+            ge=3,
+            le=500,
+        ),
+    ]

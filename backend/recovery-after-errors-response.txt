@@ -1,0 +1,9 @@
+event: loaded
+data: {"file": "transformer-weights-e100-l1-d32-h2-ff128-ctx32.json", "prompt": "once upon a time"}
+
+event: result
+data: {"text": "once upon a time and the garden"}
+
+event: done
+data: {}
+

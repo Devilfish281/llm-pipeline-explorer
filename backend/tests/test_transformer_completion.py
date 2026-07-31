@@ -1,4 +1,5 @@
 # tests/test_transformer_completion.py
+
 from __future__ import annotations
 
 import json
@@ -14,11 +15,15 @@ import numpy as np
 import pytest
 from how_llms_work.ml.math_utils import Mulberry32, round_typescript_decimal
 from how_llms_work.ml.transformer import (
+    EmptySavedTransformerPromptError,
     GeneratedTextSample,
     InitializedTransformerParameters,
     LogicalTrainingShardResult,
+    PreparedSavedTransformerPrompt,
+    SavedTransformerPromptTooLongError,
     TransformerPreprocessingSnapshot,
     TransformerTrainingRun,
+    UnsupportedSavedTransformerPromptError,
     build_logical_training_shards,
     build_saved_transformer_model,
     build_transformer_parameter_layout,
@@ -27,9 +32,11 @@ from how_llms_work.ml.transformer import (
     create_transformer_gradient_buffer,
     create_transformer_training_run,
     evaluate_transformer_final_loss,
+    generate_saved_transformer_text,
     generate_transformer_text,
     get_transformer_preprocessing,
     initialize_transformer_parameters,
+    prepare_saved_transformer_prompt,
 )
 
 _REFERENCE_PATH = Path(__file__).parent / "fixtures" / "transformer_completion_reference.json"
@@ -217,6 +224,531 @@ def test_completion_fixture_has_independent_provenance() -> None:
 
     assert "Independent scalar" in source
     assert "not produced by Ticket 018" in source
+
+
+def test_saved_prompt_trims_outer_whitespace_and_preserves_supported_interior_text() -> None:
+    vocabulary = [" a", ".", " b"]
+    merges = [
+        {
+            "pair": [" ", "a"],
+            "merged": " a",
+        },
+        {
+            "pair": [" ", "b"],
+            "merged": " b",
+        },
+    ]
+
+    prepared = prepare_saved_transformer_prompt(
+        " \t a. b \r\n",
+        vocabulary,
+        merges,
+    )
+
+    assert prepared == PreparedSavedTransformerPrompt(
+        text="a. b",
+        token_ids=(0, 1, 2),
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "",
+        " \t\r\n ",
+    ],
+)
+def test_saved_prompt_rejects_empty_or_whitespace_only_text(
+    prompt: str,
+) -> None:
+    with pytest.raises(EmptySavedTransformerPromptError):
+        prepare_saved_transformer_prompt(
+            prompt,
+            [" a"],
+            [
+                {
+                    "pair": [" ", "a"],
+                    "merged": " a",
+                }
+            ],
+        )
+
+
+def test_saved_prompt_accepts_one_through_sixteen_duplicate_model_tokens() -> None:
+    vocabulary = [" a"]
+    merges = [
+        {
+            "pair": [" ", "a"],
+            "merged": " a",
+        }
+    ]
+
+    one_token = prepare_saved_transformer_prompt(
+        "a",
+        vocabulary,
+        merges,
+    )
+    sixteen_tokens = prepare_saved_transformer_prompt(
+        " ".join(["a"] * 16),
+        vocabulary,
+        merges,
+    )
+
+    assert one_token.token_ids == (0,)
+    assert sixteen_tokens.token_ids == (0,) * 16
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "A",
+        "a  a",
+        "a_",
+    ],
+)
+def test_saved_prompt_rejects_unsupported_text_without_normalizing_or_dropping(
+    prompt: str,
+) -> None:
+    with pytest.raises(UnsupportedSavedTransformerPromptError):
+        prepare_saved_transformer_prompt(
+            prompt,
+            [" a"],
+            [
+                {
+                    "pair": [" ", "a"],
+                    "merged": " a",
+                }
+            ],
+        )
+
+
+def test_saved_prompt_rejects_seventeen_model_tokens() -> None:
+    with pytest.raises(SavedTransformerPromptTooLongError):
+        prepare_saved_transformer_prompt(
+            " ".join(["a"] * 17),
+            [" a"],
+            [
+                {
+                    "pair": [" ", "a"],
+                    "merged": " a",
+                }
+            ],
+        )
+
+
+def test_saved_prompt_preserves_merge_order_and_vocabulary_id_order() -> None:
+    ordered_merges = [
+        {
+            "pair": [" ", "a"],
+            "merged": " a",
+        },
+        {
+            "pair": [" a", "b"],
+            "merged": " ab",
+        },
+        {
+            "pair": [" ab", "c"],
+            "merged": " abc",
+        },
+    ]
+    reordered_merges = [
+        {
+            "pair": [" a", "b"],
+            "merged": " ab",
+        },
+        {
+            "pair": [" ", "a"],
+            "merged": " a",
+        },
+        {
+            "pair": [" ab", "c"],
+            "merged": " abc",
+        },
+    ]
+    word_merges = [
+        {
+            "pair": [" ", "a"],
+            "merged": " a",
+        },
+        {
+            "pair": [" ", "b"],
+            "merged": " b",
+        },
+    ]
+
+    ordered = prepare_saved_transformer_prompt(
+        "abc",
+        [" abc"],
+        ordered_merges,
+    )
+    reversed_vocabulary = prepare_saved_transformer_prompt(
+        "a b",
+        [" b", " a"],
+        word_merges,
+    )
+
+    assert ordered.token_ids == (0,)
+    assert reversed_vocabulary.token_ids == (1, 0)
+
+    with pytest.raises(UnsupportedSavedTransformerPromptError):
+        prepare_saved_transformer_prompt(
+            "abc",
+            [" abc"],
+            reordered_merges,
+        )
+
+
+def test_saved_prompt_does_not_mutate_or_reuse_loaded_model_metadata() -> None:
+    vocabulary = [" a", " b"]
+    merges = [
+        {
+            "pair": [" ", "a"],
+            "merged": " a",
+        },
+        {
+            "pair": [" ", "b"],
+            "merged": " b",
+        },
+    ]
+    original_vocabulary = list(vocabulary)
+    original_merges = json.loads(json.dumps(merges))
+
+    first = prepare_saved_transformer_prompt(
+        "a b",
+        vocabulary,
+        merges,
+    )
+    second = prepare_saved_transformer_prompt(
+        "a b",
+        vocabulary,
+        merges,
+    )
+
+    assert first == PreparedSavedTransformerPrompt(
+        text="a b",
+        token_ids=(0, 1),
+    )
+    assert second == first
+    assert second is not first
+    assert vocabulary == original_vocabulary
+    assert merges == original_merges
+    assert isinstance(first.token_ids, tuple)
+
+    vocabulary.reverse()
+    merges[0]["pair"][0] = "x"
+
+    assert first == PreparedSavedTransformerPrompt(
+        text="a b",
+        token_ids=(0, 1),
+    )
+
+
+def test_saved_generation_uses_seed_42_and_preserves_exact_prompt_prefix() -> None:
+    preprocessing = get_transformer_preprocessing()
+    parameters = _constant_logit_parameters()
+    prepared_prompt = PreparedSavedTransformerPrompt(
+        text="once upon a",
+        token_ids=preprocessing.generation_seed_ids,
+    )
+    generation_reference = _REFERENCE["generation"]
+    before = parameters.storage.tobytes()
+
+    result = generate_saved_transformer_text(
+        parameters,
+        preprocessing.vocabulary,
+        prepared_prompt,
+        temperature=float(generation_reference["temperature"]),
+        top_p=float(generation_reference["topP"]),
+        max_tokens=int(generation_reference["maxTokens"]),
+        cancellation_event=Event(),
+    )
+
+    reconstructed_seed = "".join(
+        preprocessing.vocabulary[token_id] for token_id in preprocessing.generation_seed_ids
+    )
+    training_reference = str(generation_reference["expected"]["0"])
+
+    assert training_reference.startswith(reconstructed_seed)
+
+    expected_continuation = training_reference[len(reconstructed_seed) :]
+
+    assert result == f"{prepared_prompt.text}{expected_continuation}"
+    assert result.encode("utf-8").startswith(prepared_prompt.text.encode("utf-8"))
+    assert parameters.storage.tobytes() == before
+
+
+def test_saved_generation_uses_latest_sixteen_context_and_sampling_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preprocessing = get_transformer_preprocessing()
+    parameters = _constant_logit_parameters()
+    prompt_token_ids = tuple(range(16))
+    prepared_prompt = PreparedSavedTransformerPrompt(
+        text="exact prompt",
+        token_ids=prompt_token_ids,
+    )
+    temperature = 0.5
+    top_p = 0.6
+    max_tokens = 4
+
+    observed_contexts: list[tuple[int, ...]] = []
+    observed_scaled_rows: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+    observed_top_p: list[float] = []
+    observed_generator_states: list[tuple[int, int]] = []
+    sampled_token_ids: list[int] = []
+
+    original_forward = transformer_module.calculate_transformer_forward
+    original_softmax = transformer_module.stable_row_softmax
+    original_sampler = transformer_module._sample_transformer_nucleus_token
+
+    def recording_forward(
+        input_ids: tuple[int, ...],
+        parameter_views: transformer_module.TransformerParameterViews,
+    ) -> transformer_module.TransformerForwardResult:
+        observed_contexts.append(input_ids)
+
+        return original_forward(
+            input_ids,
+            parameter_views,
+        )
+
+    def recording_softmax(
+        scores: np.ndarray[Any, np.dtype[np.float32]],
+    ) -> np.ndarray[Any, np.dtype[np.float32]]:
+        if scores.shape == (
+            1,
+            parameters.layout.vocabulary_size,
+        ):
+            observed_scaled_rows.append(scores.copy())
+
+        return original_softmax(scores)
+
+    def recording_sampler(
+        probabilities: np.ndarray[Any, np.dtype[np.float32]],
+        *,
+        top_p: float,
+        generator: Mulberry32,
+    ) -> int:
+        observed_top_p.append(top_p)
+        observed_generator_states.append(
+            (
+                generator.state,
+                generator.draw_count,
+            )
+        )
+
+        token_id = original_sampler(
+            probabilities,
+            top_p=top_p,
+            generator=generator,
+        )
+        sampled_token_ids.append(token_id)
+
+        return token_id
+
+    monkeypatch.setattr(
+        transformer_module,
+        "calculate_transformer_forward",
+        recording_forward,
+    )
+    monkeypatch.setattr(
+        transformer_module,
+        "stable_row_softmax",
+        recording_softmax,
+    )
+    monkeypatch.setattr(
+        transformer_module,
+        "_sample_transformer_nucleus_token",
+        recording_sampler,
+    )
+
+    result = generate_saved_transformer_text(
+        parameters,
+        preprocessing.vocabulary,
+        prepared_prompt,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        cancellation_event=Event(),
+    )
+
+    assert len(observed_contexts) == max_tokens
+    assert len(observed_scaled_rows) == max_tokens
+    assert len(sampled_token_ids) == max_tokens
+    assert observed_top_p == [top_p] * max_tokens
+    assert observed_generator_states[0] == (42, 0)
+
+    accumulated_ids = list(prompt_token_ids)
+
+    for context_ids, sampled_token_id in zip(
+        observed_contexts,
+        sampled_token_ids,
+        strict=True,
+    ):
+        assert context_ids == tuple(accumulated_ids[-16:])
+        accumulated_ids.append(sampled_token_id)
+
+    expected_scaled_logits = (
+        np.asarray(
+            parameters.views.head_b,
+            dtype=np.float64,
+        )
+        / temperature
+    )
+    expected_scaled_row = np.asarray(
+        expected_scaled_logits,
+        dtype=np.float32,
+    ).reshape(
+        1,
+        parameters.layout.vocabulary_size,
+    )
+
+    np.testing.assert_array_equal(
+        observed_scaled_rows[0],
+        expected_scaled_row,
+    )
+
+    expected_continuation = "".join(
+        preprocessing.vocabulary[token_id] for token_id in sampled_token_ids
+    )
+
+    assert result == f"{prepared_prompt.text}{expected_continuation}"
+
+
+def test_saved_generation_isolated_from_different_prior_calls() -> None:
+    preprocessing = get_transformer_preprocessing()
+    parameters = _constant_logit_parameters()
+    prepared_prompt = PreparedSavedTransformerPrompt(
+        text="once upon a",
+        token_ids=preprocessing.generation_seed_ids,
+    )
+
+    first = generate_saved_transformer_text(
+        parameters,
+        preprocessing.vocabulary,
+        prepared_prompt,
+        temperature=0.8,
+        top_p=0.9,
+        max_tokens=5,
+        cancellation_event=Event(),
+    )
+
+    generate_saved_transformer_text(
+        parameters,
+        preprocessing.vocabulary,
+        prepared_prompt,
+        temperature=1.2,
+        top_p=0.4,
+        max_tokens=3,
+        cancellation_event=Event(),
+    )
+
+    second = generate_saved_transformer_text(
+        parameters,
+        preprocessing.vocabulary,
+        prepared_prompt,
+        temperature=0.8,
+        top_p=0.9,
+        max_tokens=5,
+        cancellation_event=Event(),
+    )
+
+    assert second == first
+
+
+@pytest.mark.parametrize(
+    (
+        "keyword",
+        "value",
+        "error_type",
+    ),
+    [
+        ("temperature", 1, TypeError),
+        ("temperature", math.inf, FloatingPointError),
+        ("temperature", 0.09, ValueError),
+        ("temperature", 2.01, ValueError),
+        ("top_p", 1, TypeError),
+        ("top_p", math.nan, FloatingPointError),
+        ("top_p", 0.09, ValueError),
+        ("top_p", 1.01, ValueError),
+        ("max_tokens", True, TypeError),
+        ("max_tokens", 2, ValueError),
+        ("max_tokens", 501, ValueError),
+    ],
+)
+def test_saved_generation_strictly_validates_public_arguments(
+    keyword: str,
+    value: object,
+    error_type: type[Exception],
+) -> None:
+    preprocessing = get_transformer_preprocessing()
+    arguments: dict[str, object] = {
+        "temperature": 0.8,
+        "top_p": 0.9,
+        "max_tokens": 3,
+    }
+    arguments[keyword] = value
+
+    with pytest.raises(error_type):
+        generate_saved_transformer_text(
+            _constant_logit_parameters(),
+            preprocessing.vocabulary,
+            PreparedSavedTransformerPrompt(
+                text="once upon a",
+                token_ids=preprocessing.generation_seed_ids,
+            ),
+            temperature=arguments["temperature"],
+            top_p=arguments["top_p"],
+            max_tokens=arguments["max_tokens"],
+            cancellation_event=Event(),
+        )
+
+
+def test_saved_generation_rejects_incompatible_or_non_finite_model_state() -> None:
+    preprocessing = get_transformer_preprocessing()
+    prepared_prompt = PreparedSavedTransformerPrompt(
+        text="once upon a",
+        token_ids=preprocessing.generation_seed_ids,
+    )
+
+    with pytest.raises(ValueError):
+        generate_saved_transformer_text(
+            _constant_logit_parameters(),
+            preprocessing.vocabulary[:-1],
+            prepared_prompt,
+            temperature=0.8,
+            top_p=0.9,
+            max_tokens=3,
+            cancellation_event=Event(),
+        )
+
+    non_finite_parameters = _constant_logit_parameters()
+    non_finite_parameters.storage[0] = np.float32(np.nan)
+
+    with pytest.raises(FloatingPointError):
+        generate_saved_transformer_text(
+            non_finite_parameters,
+            preprocessing.vocabulary,
+            prepared_prompt,
+            temperature=0.8,
+            top_p=0.9,
+            max_tokens=3,
+            cancellation_event=Event(),
+        )
+
+    overflowing_parameters = _zero_initialized_parameters()
+    overflowing_parameters.views.head_b.fill(np.finfo(np.float32).max)
+
+    with pytest.raises(FloatingPointError):
+        generate_saved_transformer_text(
+            overflowing_parameters,
+            preprocessing.vocabulary,
+            prepared_prompt,
+            temperature=0.1,
+            top_p=0.9,
+            max_tokens=3,
+            cancellation_event=Event(),
+        )
 
 
 @pytest.mark.parametrize(

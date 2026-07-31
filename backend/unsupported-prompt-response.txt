@@ -1,0 +1,3 @@
+event: error
+data: {"error": "The prompt contains text that this saved Transformer model cannot tokenize."}
+

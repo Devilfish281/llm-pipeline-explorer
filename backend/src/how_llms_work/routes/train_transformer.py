@@ -30,22 +30,27 @@ from how_llms_work.ml.transformer import (
     TRANSFORMER_FEED_FORWARD_DIMENSION,
     TRANSFORMER_MAX_LAYER_COUNT,
     TRANSFORMER_MIN_LAYER_COUNT,
+    EmptySavedTransformerPromptError,
     InitializedTransformerParameters,
     SavedTransformerConfig,
     SavedTransformerMerge,
     SavedTransformerModel,
+    SavedTransformerPromptTooLongError,
     SavedTransformerWeights,
     TransformerParameterLayout,
     TransformerParameterLayoutRecord,
     TransformerPreprocessingSnapshot,
+    UnsupportedSavedTransformerPromptError,
     build_saved_transformer_model,
     build_transformer_parameter_layout,
     build_transformer_parameter_views,
     create_transformer_training_run,
     evaluate_transformer_final_loss,
+    generate_saved_transformer_text,
     generate_transformer_text,
     get_transformer_preprocessing,
     initialize_transformer_parameters,
+    prepare_saved_transformer_prompt,
     transformer_parameter_count,
 )
 from how_llms_work.ml.transformer_worker import (
@@ -53,7 +58,7 @@ from how_llms_work.ml.transformer_worker import (
     RequestScopedWorkerGroupCleanupReport,
     create_request_scoped_worker_group,
 )
-from how_llms_work.schemas import TrainTransformerRequest
+from how_llms_work.schemas import LoadTransformerRequest, TrainTransformerRequest
 from how_llms_work.sse import create_sse_response, format_sse
 
 logger = logging.getLogger(__name__)
@@ -66,10 +71,26 @@ _TRANSFORMER_MAX_EPOCH_COUNT: Final = 2_000
 PRESENTATION_DELAY_SECONDS: Final = 0.02
 _TRANSFORMER_HELPER_TIMEOUT_SECONDS: Final = 300.0
 _TRANSFORMER_HELPER_POLL_SECONDS: Final = 0.1
+
 _SAVED_TRANSFORMER_MODEL_LOAD_FAILURE: Final = "The saved Transformer model could not be loaded."
+_NO_VALID_SAVED_TRANSFORMER_MODEL_FAILURE: Final = "No valid saved Transformer model was found."
+_EMPTY_SAVED_TRANSFORMER_PROMPT_FAILURE: Final = "The prompt must not be empty."
+_UNSUPPORTED_SAVED_TRANSFORMER_PROMPT_FAILURE: Final = (
+    "The prompt contains text that this saved Transformer model cannot tokenize."
+)
+_SAVED_TRANSFORMER_PROMPT_TOO_LONG_FAILURE: Final = (
+    "The prompt must contain no more than 16 tokens."
+)
+_SAVED_TRANSFORMER_GENERATION_FAILURE: Final = (
+    "The saved Transformer model could not generate text."
+)
+_SAVED_TRANSFORMER_START_FAILURE: Final = "Saved Transformer generation could not start."
+_TRANSFORMER_REQUEST_OVERLAP_DETAIL: Final = "Another Transformer request is already running."
+
 _TRANSFORMER_MODEL_FILENAME_PATTERN: Final = re.compile(
     r"transformer-weights-e([0-9]+)-l([0-9]+)-d32-h2-ff128-ctx32\.json"
 )
+
 
 _HelperResultT = TypeVar("_HelperResultT")
 
@@ -84,6 +105,15 @@ class _SelectedTransformerModelFile:
 
     model_filename: str
     path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _LatestTransformerModelCandidate:
+    """One safely classified direct model candidate with deterministic ordering metadata."""
+
+    model_filename: str
+    path: Path
+    modification_time_ns: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,6 +539,49 @@ def _select_named_transformer_model_file(
     )
 
 
+def _select_latest_transformer_model_candidates() -> tuple[_LatestTransformerModelCandidate, ...]:
+    """Return safely classified direct candidates in deterministic newest-first order."""
+    model_directory, resolved_directory = _resolve_transformer_model_directory()
+    candidates: list[_LatestTransformerModelCandidate] = []
+
+    for entry in model_directory.iterdir():
+        try:
+            _parse_transformer_model_filename(entry.name)
+
+            if _path_is_transformer_model_indirection(entry):
+                continue
+
+            if not entry.is_file():
+                continue
+
+            resolved_candidate = entry.resolve(strict=True)
+
+            if resolved_candidate.parent != resolved_directory:
+                continue
+
+            modification_time_ns = entry.stat().st_mtime_ns
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+
+        candidates.append(
+            _LatestTransformerModelCandidate(
+                model_filename=entry.name,
+                path=entry,
+                modification_time_ns=modification_time_ns,
+            )
+        )
+
+    candidates.sort(
+        key=lambda candidate: (
+            candidate.modification_time_ns,
+            candidate.model_filename,
+        ),
+        reverse=True,
+    )
+
+    return tuple(candidates)
+
+
 def _build_unique_json_object(
     pairs: list[tuple[str, object]],
 ) -> dict[str, object]:
@@ -603,13 +676,12 @@ def _validate_loaded_transformer_model_document(
 
         if merged != pair[0] + pair[1]:
             raise ValueError(
-                f"Saved Transformer Model merge {merge_index} "
-                "must coherently concatenate its pair."
+                f"Saved Transformer Model merge {merge_index} must coherently concatenate its pair."
             )
 
         if tuple(pair) != expected_merge.pair or merged != expected_merge.merged:
             raise ValueError(
-                "Saved Transformer Model Merge Table must match " "the current Phase 5 ordering."
+                "Saved Transformer Model Merge Table must match the current Phase 5 ordering."
             )
 
     weights = cast(SavedTransformerWeights, model_mapping["weights"])
@@ -702,7 +774,7 @@ def _materialize_transformer_parameters(
         for coordinate_index, saved_value in enumerate(saved_values):
             target[coordinate_index] = _materialize_float32_coordinate(
                 saved_value,
-                name=("Saved Transformer Model parameter " f"{record.key}[{coordinate_index}]"),
+                name=(f"Saved Transformer Model parameter {record.key}[{coordinate_index}]"),
             )
 
     if (
@@ -761,22 +833,50 @@ def _build_loaded_transformer_model_snapshot(
     )
 
 
+def _load_selected_transformer_model(
+    selected_model: _SelectedTransformerModelFile,
+) -> LoadedTransformerModelSnapshot:
+    """Read one selected file once and build its request-owned snapshot."""
+    document_bytes = selected_model.path.read_bytes()
+    parsed_document = _parse_saved_transformer_model_document(document_bytes)
+    validated_document = _validate_loaded_transformer_model_document(
+        parsed_document,
+        model_filename=selected_model.model_filename,
+    )
+
+    return _build_loaded_transformer_model_snapshot(validated_document)
+
+
 def load_named_transformer_model(
     model_filename: str,
 ) -> LoadedTransformerModelSnapshot:
     """Load one exact named model into a complete request-owned snapshot."""
     try:
         selected_model = _select_named_transformer_model_file(model_filename)
-        document_bytes = selected_model.path.read_bytes()
-        parsed_document = _parse_saved_transformer_model_document(document_bytes)
-        validated_document = _validate_loaded_transformer_model_document(
-            parsed_document,
-            model_filename=selected_model.model_filename,
-        )
-
-        return _build_loaded_transformer_model_snapshot(validated_document)
+        return _load_selected_transformer_model(selected_model)
     except (MemoryError, OSError, RuntimeError, TypeError, ValueError):
         raise SavedTransformerModelLoadError(_SAVED_TRANSFORMER_MODEL_LOAD_FAILURE) from None
+
+
+def load_latest_transformer_model() -> LoadedTransformerModelSnapshot:
+    """Load the newest strictly valid model into a request-owned snapshot."""
+    try:
+        candidates = _select_latest_transformer_model_candidates()
+    except (MemoryError, OSError, RuntimeError, TypeError, ValueError):
+        raise SavedTransformerModelLoadError(_SAVED_TRANSFORMER_MODEL_LOAD_FAILURE) from None
+
+    for candidate in candidates:
+        selected_model = _SelectedTransformerModelFile(
+            model_filename=candidate.model_filename,
+            path=candidate.path,
+        )
+
+        try:
+            return _load_selected_transformer_model(selected_model)
+        except (MemoryError, OSError, RuntimeError, TypeError, ValueError):
+            continue
+
+    raise SavedTransformerModelLoadError(_SAVED_TRANSFORMER_MODEL_LOAD_FAILURE) from None
 
 
 def get_transformer_model_filename(
@@ -1346,7 +1446,7 @@ async def stream_transformer_training(
             "done",
             {
                 "architecture": (
-                    "Decoder-Only Transformer " f"({model_num_layers} layers, 32d, 2h, 128ff)"
+                    f"Decoder-Only Transformer ({model_num_layers} layers, 32d, 2h, 128ff)"
                 ),
                 "finalLoss": final_loss,
                 "samples": done_samples,
@@ -1380,6 +1480,138 @@ async def stream_transformer_training(
             _TRANSFORMER_RUN_SLOT.release()
 
 
+async def stream_saved_transformer_generation(
+    *,
+    request: Request,
+    model_filename: str | None,
+    prompt: str,
+    temperature: float,
+    top_p: float,
+    max_tokens: int,
+) -> AsyncIterator[str]:
+    """Stream one Saved Transformer Generation Run."""
+    cancellation_event = Event()
+
+    load_operation: Callable[[], LoadedTransformerModelSnapshot]
+
+    if model_filename is None:
+        load_operation = load_latest_transformer_model
+        load_failure_message = _NO_VALID_SAVED_TRANSFORMER_MODEL_FAILURE
+    else:
+        load_operation = partial(
+            load_named_transformer_model,
+            model_filename,
+        )
+        load_failure_message = _SAVED_TRANSFORMER_MODEL_LOAD_FAILURE
+
+    try:
+        try:
+            loaded_snapshot = await _run_unbounded_transformer_helper(
+                load_operation,
+                request=request,
+                cancellation_event=cancellation_event,
+            )
+        except SavedTransformerModelLoadError:
+            yield format_sse(
+                "error",
+                {"error": load_failure_message},
+            )
+            return
+
+        try:
+            prepared_prompt = await _run_unbounded_transformer_helper(
+                partial(
+                    prepare_saved_transformer_prompt,
+                    prompt,
+                    loaded_snapshot.vocabulary,
+                    loaded_snapshot.merges,
+                ),
+                request=request,
+                cancellation_event=cancellation_event,
+            )
+        except EmptySavedTransformerPromptError:
+            yield format_sse(
+                "error",
+                {"error": _EMPTY_SAVED_TRANSFORMER_PROMPT_FAILURE},
+            )
+            return
+        except UnsupportedSavedTransformerPromptError:
+            yield format_sse(
+                "error",
+                {"error": _UNSUPPORTED_SAVED_TRANSFORMER_PROMPT_FAILURE},
+            )
+            return
+        except SavedTransformerPromptTooLongError:
+            yield format_sse(
+                "error",
+                {"error": _SAVED_TRANSFORMER_PROMPT_TOO_LONG_FAILURE},
+            )
+            return
+
+        yield format_sse(
+            "loaded",
+            {
+                "file": loaded_snapshot.model_filename,
+                "prompt": prepared_prompt.text,
+            },
+        )
+
+        try:
+            complete_text = await _run_unbounded_transformer_helper(
+                partial(
+                    generate_saved_transformer_text,
+                    loaded_snapshot.parameters,
+                    loaded_snapshot.vocabulary,
+                    prepared_prompt,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    cancellation_event=cancellation_event,
+                ),
+                request=request,
+                cancellation_event=cancellation_event,
+            )
+        except _TransformerClientDisconnected:
+            raise
+        except Exception:
+            cancellation_event.set()
+            logger.exception("Saved Transformer text generation failed")
+
+            yield format_sse(
+                "error",
+                {"error": _SAVED_TRANSFORMER_GENERATION_FAILURE},
+            )
+            return
+
+        yield format_sse(
+            "result",
+            {"text": complete_text},
+        )
+        yield format_sse(
+            "done",
+            {},
+        )
+        return
+    except _TransformerClientDisconnected:
+        cancellation_event.set()
+        return
+    except asyncio.CancelledError:
+        cancellation_event.set()
+        raise
+    except Exception:
+        cancellation_event.set()
+        logger.exception("Saved Transformer Generation Run stream failed")
+
+        yield format_sse(
+            "error",
+            {"error": _SAVED_TRANSFORMER_GENERATION_FAILURE},
+        )
+        return
+    finally:
+        cancellation_event.set()
+        _TRANSFORMER_RUN_SLOT.release()
+
+
 @router.post("/train-transformer")
 async def train_transformer(
     payload: TrainTransformerRequest,
@@ -1389,7 +1621,7 @@ async def train_transformer(
     if not _TRANSFORMER_RUN_SLOT.acquire(blocking=False):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="A Transformer Training Run is already active.",
+            detail=_TRANSFORMER_REQUEST_OVERLAP_DETAIL,
         )
 
     try:
@@ -1432,6 +1664,41 @@ async def train_transformer(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Transformer training could not start.",
+        ) from None
+
+    return response
+
+
+@router.post("/load-transformer")
+async def load_transformer(
+    payload: LoadTransformerRequest,
+    request: Request,
+) -> StreamingResponse:
+    """Validate, reserve, and start one Saved Transformer Event Stream."""
+    if not _TRANSFORMER_RUN_SLOT.acquire(blocking=False):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=_TRANSFORMER_REQUEST_OVERLAP_DETAIL,
+        )
+
+    try:
+        response = create_sse_response(
+            stream_saved_transformer_generation(
+                request=request,
+                model_filename=payload.model_file,
+                prompt=payload.prompt,
+                temperature=payload.temperature,
+                top_p=payload.top_p,
+                max_tokens=payload.max_tokens,
+            )
+        )
+    except Exception:
+        logger.exception("Saved Transformer Generation Run preparation failed")
+        _TRANSFORMER_RUN_SLOT.release()
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_SAVED_TRANSFORMER_START_FAILURE,
         ) from None
 
     return response

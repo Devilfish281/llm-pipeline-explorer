@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from numbers import Real
 from threading import Event, Lock
@@ -74,6 +74,11 @@ __all__ = [
     "build_transformer_report_epochs",
     "create_transformer_training_run",
     "GeneratedTextSample",
+    "SavedTransformerPromptError",
+    "EmptySavedTransformerPromptError",
+    "UnsupportedSavedTransformerPromptError",
+    "SavedTransformerPromptTooLongError",
+    "PreparedSavedTransformerPrompt",
     "SavedTransformerBlockWeights",
     "SavedTransformerConfig",
     "SavedTransformerMerge",
@@ -82,7 +87,10 @@ __all__ = [
     "build_saved_transformer_model",
     "evaluate_transformer_final_loss",
     "generate_transformer_text",
+    "generate_saved_transformer_text",
+    "prepare_saved_transformer_prompt",
 ]
+
 
 TRANSFORMER_BPE_MERGE_LIMIT: Final = 1_000
 TRANSFORMER_SEQUENCE_LENGTH: Final = 16
@@ -467,6 +475,30 @@ class GeneratedTextSample:
 
     epoch: int
     text: str
+
+
+class SavedTransformerPromptError(ValueError):
+    """Base semantic failure for a Saved Transformer starting prompt."""
+
+
+class EmptySavedTransformerPromptError(SavedTransformerPromptError):
+    """The caller's prompt contains no text after outer whitespace trimming."""
+
+
+class UnsupportedSavedTransformerPromptError(SavedTransformerPromptError):
+    """The selected Saved Transformer Model cannot tokenize the complete prompt."""
+
+
+class SavedTransformerPromptTooLongError(SavedTransformerPromptError):
+    """The prompt contains more model tokens than one generation context accepts."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSavedTransformerPrompt:
+    """One exact request-owned starting prompt prepared for saved-model inference."""
+
+    text: str
+    token_ids: tuple[int, ...]
 
 
 class SavedTransformerMerge(TypedDict):
@@ -925,6 +957,70 @@ def _tokenize_transformer_story(
         )
 
     return tuple(result)
+
+
+def prepare_saved_transformer_prompt(
+    prompt: str,
+    vocabulary: Sequence[str],
+    merges: Sequence[SavedTransformerMerge],
+) -> PreparedSavedTransformerPrompt:
+    """Prepare one complete prompt with a Saved Transformer Model's own BPE artifacts."""
+    trimmed_prompt = prompt.strip()
+
+    if not trimmed_prompt:
+        raise EmptySavedTransformerPromptError
+
+    encoded_merges = tuple(
+        Merge(
+            pair=(
+                _encode_transformer_pre_token(saved_merge["pair"][0]),
+                _encode_transformer_pre_token(saved_merge["pair"][1]),
+            ),
+            merged=_encode_transformer_pre_token(saved_merge["merged"]),
+            frequency=0,
+        )
+        for saved_merge in merges
+    )
+
+    source_text = f" {trimmed_prompt}"
+    pre_tokens = _transformer_pre_tokens(source_text)
+
+    if "".join(pre_tokens) != source_text:
+        raise UnsupportedSavedTransformerPromptError
+
+    prompt_tokens: list[str] = []
+
+    for pre_token in pre_tokens:
+        try:
+            encoded_pre_token = _encode_transformer_pre_token(pre_token)
+        except ValueError:
+            raise UnsupportedSavedTransformerPromptError from None
+
+        prompt_tokens.extend(
+            _decode_transformer_token(token)
+            for token in apply_merges(
+                encoded_pre_token,
+                encoded_merges,
+            )
+        )
+
+    token_indices = {token: token_id for token_id, token in enumerate(vocabulary)}
+
+    try:
+        token_ids = tuple(token_indices[token] for token in prompt_tokens)
+    except KeyError:
+        raise UnsupportedSavedTransformerPromptError from None
+
+    if not token_ids:
+        raise UnsupportedSavedTransformerPromptError
+
+    if len(token_ids) > TRANSFORMER_SEQUENCE_LENGTH:
+        raise SavedTransformerPromptTooLongError
+
+    return PreparedSavedTransformerPrompt(
+        text=trimmed_prompt,
+        token_ids=token_ids,
+    )
 
 
 def _build_vocabulary(
@@ -3831,6 +3927,76 @@ def _validate_transformer_generation_arguments(
     return epoch, temperature, top_p, max_tokens
 
 
+def _validate_saved_transformer_generation_state(
+    parameters: InitializedTransformerParameters,
+    vocabulary: Sequence[str],
+    prompt: PreparedSavedTransformerPrompt,
+) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    """Validate request-owned saved-model state before deterministic generation."""
+    if type(parameters) is not InitializedTransformerParameters:
+        raise TypeError("parameters must be an InitializedTransformerParameters.")
+
+    if isinstance(vocabulary, (str, bytes)) or not isinstance(vocabulary, Sequence):
+        raise TypeError("vocabulary must be an ordered sequence of strings.")
+
+    validated_vocabulary = tuple(vocabulary)
+
+    if not validated_vocabulary:
+        raise ValueError("vocabulary must not be empty.")
+
+    if any(type(token) is not str for token in validated_vocabulary):
+        raise TypeError("Every vocabulary entry must be a string.")
+
+    vocabulary_size = len(validated_vocabulary)
+
+    _validate_transformer_parameter_layout(parameters.layout)
+
+    if parameters.layout.vocabulary_size != vocabulary_size:
+        raise ValueError("parameter layout Vocabulary size does not match vocabulary.")
+
+    storage = _validate_float32_array(
+        parameters.storage,
+        name="Saved Transformer generation parameter storage",
+        shape=(parameters.layout.total_float_count,),
+    )
+
+    if parameters.views.layout != parameters.layout:
+        raise ValueError("parameter views do not match their canonical layout.")
+
+    parameter_vocabulary_size = _validate_parameter_views(parameters.views)
+
+    if parameter_vocabulary_size != vocabulary_size:
+        raise ValueError("parameter Vocabulary size does not match vocabulary.")
+
+    for parameter_view in _parameter_arrays(parameters.views):
+        if not np.shares_memory(parameter_view, storage):
+            raise ValueError("Every generation parameter view must use parameter storage.")
+
+    if type(prompt) is not PreparedSavedTransformerPrompt:
+        raise TypeError("prompt must be a PreparedSavedTransformerPrompt.")
+
+    if type(prompt.text) is not str:
+        raise TypeError("prompt.text must be a string.")
+
+    if not prompt.text or prompt.text != prompt.text.strip():
+        raise ValueError("prompt.text must be one non-empty outer-trimmed string.")
+
+    if type(prompt.token_ids) is not tuple:
+        raise TypeError("prompt.token_ids must be an immutable tuple.")
+
+    if not 1 <= len(prompt.token_ids) <= TRANSFORMER_SEQUENCE_LENGTH:
+        raise ValueError("prompt.token_ids must contain between one and sixteen IDs.")
+
+    for token_id in prompt.token_ids:
+        if type(token_id) is not int:
+            raise TypeError("Every prompt token ID must be an integer.")
+
+        if token_id < 0 or token_id >= vocabulary_size:
+            raise ValueError("Every prompt token ID must exist in the vocabulary.")
+
+    return validated_vocabulary, prompt.token_ids
+
+
 def _sample_transformer_nucleus_token(
     probabilities: _Float32Array,
     *,
@@ -3893,6 +4059,75 @@ def _sample_transformer_nucleus_token(
     return nucleus[-1][0]
 
 
+def _generate_transformer_token_ids(
+    parameters: InitializedTransformerParameters,
+    initial_token_ids: tuple[int, ...],
+    *,
+    seed: int,
+    temperature: float,
+    top_p: float,
+    max_tokens: int,
+    cancellation_event: Event,
+) -> tuple[int, ...]:
+    """Generate deterministic token IDs through the shared decoder-only sampling path."""
+    generated_ids = list(initial_token_ids)
+    generator = Mulberry32(seed)
+
+    for _ in range(max_tokens):
+        _raise_if_transformer_completion_cancelled(cancellation_event)
+
+        context_ids = tuple(generated_ids[-TRANSFORMER_SEQUENCE_LENGTH:])
+
+        forward = calculate_transformer_forward(
+            context_ids,
+            parameters.views,
+        )
+
+        final_logits = forward.logits[-1]
+
+        scaled_values = (
+            np.asarray(
+                final_logits,
+                dtype=np.float64,
+            )
+            / temperature
+        )
+
+        if not np.isfinite(scaled_values).all():
+            raise FloatingPointError("temperature-scaled logits are not finite.")
+
+        with np.errstate(
+            over="ignore",
+            invalid="ignore",
+        ):
+            scaled_row: _Float32Array = np.array(
+                scaled_values,
+                dtype=np.float32,
+                order="C",
+                copy=True,
+            ).reshape(
+                1,
+                parameters.layout.vocabulary_size,
+            )
+
+        if not np.isfinite(scaled_row).all():
+            raise FloatingPointError("temperature-scaled float32 logits are not finite.")
+
+        probabilities: _Float32Array = stable_row_softmax(scaled_row)[0]
+
+        next_token_id = _sample_transformer_nucleus_token(
+            probabilities,
+            top_p=top_p,
+            generator=generator,
+        )
+
+        generated_ids.append(next_token_id)
+
+    _raise_if_transformer_completion_cancelled(cancellation_event)
+
+    return tuple(generated_ids)
+
+
 def generate_transformer_text(
     parameters: InitializedTransformerParameters,
     preprocessing: TransformerPreprocessingSnapshot,
@@ -3916,61 +4151,20 @@ def generate_transformer_text(
         max_tokens=max_tokens,
     )
 
-    vocabulary_size = _validate_transformer_completion_parameters(
+    _validate_transformer_completion_parameters(
         parameters,
         preprocessing,
     )
 
-    generated_ids = list(preprocessing.generation_seed_ids)
-    generator = Mulberry32((42 + validated_epoch) & 0xFFFFFFFF)
-
-    for _ in range(validated_max_tokens):
-        _raise_if_transformer_completion_cancelled(cancellation_event)
-
-        context_ids = tuple(generated_ids[-TRANSFORMER_SEQUENCE_LENGTH:])
-
-        forward = calculate_transformer_forward(
-            context_ids,
-            parameters.views,
-        )
-
-        final_logits = forward.logits[-1]
-
-        scaled_values = (
-            np.asarray(
-                final_logits,
-                dtype=np.float64,
-            )
-            / validated_temperature
-        )
-
-        if not np.isfinite(scaled_values).all():
-            raise FloatingPointError("temperature-scaled logits are not finite.")
-
-        scaled_row: _Float32Array = np.array(
-            scaled_values,
-            dtype=np.float32,
-            order="C",
-            copy=True,
-        ).reshape(
-            1,
-            vocabulary_size,
-        )
-
-        if not np.isfinite(scaled_row).all():
-            raise FloatingPointError("temperature-scaled float32 logits are not finite.")
-
-        probabilities: _Float32Array = stable_row_softmax(scaled_row)[0]
-
-        next_token_id = _sample_transformer_nucleus_token(
-            probabilities,
-            top_p=validated_top_p,
-            generator=generator,
-        )
-
-        generated_ids.append(next_token_id)
-
-    _raise_if_transformer_completion_cancelled(cancellation_event)
+    generated_ids = _generate_transformer_token_ids(
+        parameters,
+        preprocessing.generation_seed_ids,
+        seed=(42 + validated_epoch) & 0xFFFFFFFF,
+        temperature=validated_temperature,
+        top_p=validated_top_p,
+        max_tokens=validated_max_tokens,
+        cancellation_event=cancellation_event,
+    )
 
     text = "".join(preprocessing.vocabulary[token_id] for token_id in generated_ids)
 
@@ -3978,6 +4172,52 @@ def generate_transformer_text(
         epoch=validated_epoch,
         text=text,
     )
+
+
+def generate_saved_transformer_text(
+    parameters: InitializedTransformerParameters,
+    vocabulary: Sequence[str],
+    prompt: PreparedSavedTransformerPrompt,
+    *,
+    temperature: float,
+    top_p: float,
+    max_tokens: int,
+    cancellation_event: Event,
+) -> str:
+    """Generate one deterministic complete continuation from a prepared saved-model prompt."""
+    (
+        _validated_epoch,
+        validated_temperature,
+        validated_top_p,
+        validated_max_tokens,
+    ) = _validate_transformer_generation_arguments(
+        epoch=0,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
+    )
+
+    validated_vocabulary, prompt_token_ids = _validate_saved_transformer_generation_state(
+        parameters,
+        vocabulary,
+        prompt,
+    )
+
+    generated_ids = _generate_transformer_token_ids(
+        parameters,
+        prompt_token_ids,
+        seed=42,
+        temperature=validated_temperature,
+        top_p=validated_top_p,
+        max_tokens=validated_max_tokens,
+        cancellation_event=cancellation_event,
+    )
+
+    continuation_ids = generated_ids[len(prompt_token_ids) :]
+
+    continuation = "".join(validated_vocabulary[token_id] for token_id in continuation_ids)
+
+    return f"{prompt.text}{continuation}"
 
 
 def evaluate_transformer_final_loss(

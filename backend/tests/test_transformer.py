@@ -79,6 +79,11 @@ _EXPECTED_TRANSFORMER_PUBLIC_SYMBOLS = (
     "build_transformer_report_epochs",
     "create_transformer_training_run",
     "GeneratedTextSample",
+    "SavedTransformerPromptError",
+    "EmptySavedTransformerPromptError",
+    "UnsupportedSavedTransformerPromptError",
+    "SavedTransformerPromptTooLongError",
+    "PreparedSavedTransformerPrompt",
     "SavedTransformerBlockWeights",
     "SavedTransformerConfig",
     "SavedTransformerMerge",
@@ -87,7 +92,10 @@ _EXPECTED_TRANSFORMER_PUBLIC_SYMBOLS = (
     "build_saved_transformer_model",
     "evaluate_transformer_final_loss",
     "generate_transformer_text",
+    "generate_saved_transformer_text",
+    "prepare_saved_transformer_prompt",
 )
+
 
 REFERENCE_PATH = Path(__file__).parent / "fixtures" / "transformer_preprocessing_reference.json"
 LAYOUT_INITIALIZATION_REFERENCE_PATH = (

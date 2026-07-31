@@ -1,0 +1,3 @@
+event: error
+data: {"error": "The saved Transformer model could not be loaded."}
+

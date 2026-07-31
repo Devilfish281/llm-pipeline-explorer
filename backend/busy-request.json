@@ -1,0 +1,1 @@
+{"temperature":0.8,"topP":0.9,"maxTokens":500,"prompt":"once upon a time","modelFile":"transformer-weights-e1000-l6-d32-h2-ff128-ctx32.json"}
