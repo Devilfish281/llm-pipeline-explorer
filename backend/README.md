@@ -467,7 +467,49 @@ king queen man woman cat dog | 1000 32 1 2
 | Higher-capacity test |    500 |         32 |      1 |                2 |
 ````
 
+# XOR
+
+## single-layer
+
+```text
+single-layer 5000
+```
+
+## multi-layer
+
+```text
+multi-layer 5000
+```
+
+# Basic Tokenizer
+
+```text
+cat cat car
+```
+
+```text
+the cat sat on the mat
+```
+
+# Train Embeddings
+
+## Your web input format i
+
+```text
+words | epochs dimensions window-size negative-samples
+```
+
+## the smallest and fastest valid test first:
+
+```text
+king queen dog cat | 10 4 1 1
+```
+
 # Train Transformer
+
+```text
+50 1.0 0.6 1 3
+```
 
 ```text
 300 0.8 0.9 2 40
@@ -482,6 +524,36 @@ king queen man woman cat dog | 1000 32 1 2
 ```text
 50 1.0 0.6 1 3
 ```
+
+### Understand the five numbers
+
+The format is:
+
+```text
+epochs temperature top-p layers max-tokens
+```
+
+Your test means:
+
+| Value | Setting        | Meaning                                         |
+| ----: | -------------- | ----------------------------------------------- |
+|  `50` | Epochs         | Train through epochs `0–50`                     |
+| `1.0` | Temperature    | Normal sampling temperature                     |
+| `0.6` | Top-P          | Sample from the highest-probability 60% nucleus |
+|   `1` | Layers         | Use the smallest one-layer Transformer          |
+|   `3` | Maximum tokens | Generate three new sample tokens                |
+
+Your current accepted ranges are:
+
+| Setting        | Allowed range |
+| -------------- | ------------: |
+| Epochs         |     `50–2000` |
+| Temperature    |     `0.1–2.0` |
+| Top-P          |     `0.1–1.0` |
+| Layers         |         `1–6` |
+| Maximum tokens |       `3–500` |
+
+The request fields sent to FastAPI are `epochs`, `temperature`, `topP`, `numLayers`, and `maxTokens`.
 
 ## What `50 1.0 0.6 1 3` means
 
@@ -633,10 +705,32 @@ This gives you a reference for comparing later runs.
 ### The maximum configuration:
 
 ```text
-2000 1 0.6 6 3
+1000 0.8 0.9 6 20
 ```
-
 
 ```text
 1000 1 0.6 6 3
+```
+
+## Check whether it is really working
+
+### While the page appears unchanged, open another PowerShell window:
+
+```powershell
+Get-Process python* -ErrorAction SilentlyContinue |
+    Select-Object `
+        Id,
+        ProcessName,
+        CPU,
+        @{Name = "MemoryMB"; Expression = {
+            [math]::Round($_.WorkingSet64 / 1MB, 1)
+        }}
+```
+
+### Wait 30 seconds:
+
+```text
+Run the process command again.
+
+If the worker processes’ cumulative CPU numbers increase, the model is still training.
 ```

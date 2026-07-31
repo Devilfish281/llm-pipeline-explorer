@@ -7,15 +7,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import re
 import tempfile
 from asyncio import sleep as presentation_sleep
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Event, Lock
-from typing import Final, TypeVar, cast
+from typing import Final, NoReturn, TypeVar, cast
 
+import numpy as np
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from how_llms_work.ml.math_utils import Mulberry32
@@ -26,11 +30,17 @@ from how_llms_work.ml.transformer import (
     TRANSFORMER_FEED_FORWARD_DIMENSION,
     TRANSFORMER_MAX_LAYER_COUNT,
     TRANSFORMER_MIN_LAYER_COUNT,
+    InitializedTransformerParameters,
+    SavedTransformerConfig,
+    SavedTransformerMerge,
     SavedTransformerModel,
+    SavedTransformerWeights,
     TransformerParameterLayout,
+    TransformerParameterLayoutRecord,
     TransformerPreprocessingSnapshot,
     build_saved_transformer_model,
     build_transformer_parameter_layout,
+    build_transformer_parameter_views,
     create_transformer_training_run,
     evaluate_transformer_final_loss,
     generate_transformer_text,
@@ -56,8 +66,47 @@ _TRANSFORMER_MAX_EPOCH_COUNT: Final = 2_000
 PRESENTATION_DELAY_SECONDS: Final = 0.02
 _TRANSFORMER_HELPER_TIMEOUT_SECONDS: Final = 300.0
 _TRANSFORMER_HELPER_POLL_SECONDS: Final = 0.1
+_SAVED_TRANSFORMER_MODEL_LOAD_FAILURE: Final = "The saved Transformer model could not be loaded."
+_TRANSFORMER_MODEL_FILENAME_PATTERN: Final = re.compile(
+    r"transformer-weights-e([0-9]+)-l([0-9]+)-d32-h2-ff128-ctx32\.json"
+)
 
 _HelperResultT = TypeVar("_HelperResultT")
+
+
+class SavedTransformerModelLoadError(RuntimeError):
+    """Stable public failure for unsafe or unusable Saved Transformer Models."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectedTransformerModelFile:
+    """One exact ordinary model file selected from the genuine model directory."""
+
+    model_filename: str
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatedTransformerModelDocument:
+    """One strictly validated current-format Saved Transformer Model document."""
+
+    model_filename: str
+    config: SavedTransformerConfig
+    vocabulary: list[str]
+    merges: list[SavedTransformerMerge]
+    weights: SavedTransformerWeights
+    layout: TransformerParameterLayout
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class LoadedTransformerModelSnapshot:
+    """One complete request-owned Transformer inference snapshot."""
+
+    model_filename: str
+    config: SavedTransformerConfig
+    vocabulary: list[str]
+    merges: list[SavedTransformerMerge]
+    parameters: InitializedTransformerParameters
 
 
 _MODEL_KEYS: Final = (
@@ -350,10 +399,384 @@ def _build_transformer_model_filename(
     )
 
 
+def _parse_transformer_model_filename(model_filename: object) -> tuple[int, int]:
+    """Validate one untrusted exact Phase 5 Transformer model filename."""
+    if type(model_filename) is not str:
+        raise TypeError("Saved Transformer Model filename must be a string.")
+
+    if not model_filename or model_filename != model_filename.strip():
+        raise ValueError("Saved Transformer Model filename must be an exact plain name.")
+
+    windows_path = PureWindowsPath(model_filename)
+    posix_path = PurePosixPath(model_filename)
+
+    if (
+        "/" in model_filename
+        or "\\" in model_filename
+        or windows_path.drive
+        or windows_path.root
+        or posix_path.root
+        or ".." in windows_path.parts
+        or ".." in posix_path.parts
+    ):
+        raise ValueError("Saved Transformer Model filename must be an exact plain name.")
+
+    match = _TRANSFORMER_MODEL_FILENAME_PATTERN.fullmatch(model_filename)
+
+    if match is None:
+        raise ValueError("Saved Transformer Model filename is not canonical.")
+
+    epochs = _validate_transformer_epochs(int(match.group(1)))
+    num_layers = _validate_bounded_integer(
+        int(match.group(2)),
+        name="numLayers",
+        minimum=TRANSFORMER_MIN_LAYER_COUNT,
+        maximum=TRANSFORMER_MAX_LAYER_COUNT,
+    )
+
+    canonical_filename = _build_transformer_model_filename(
+        epochs=epochs,
+        num_layers=num_layers,
+    )
+
+    if model_filename != canonical_filename:
+        raise ValueError("Saved Transformer Model filename is not canonical.")
+
+    return epochs, num_layers
+
+
+def _path_is_transformer_model_indirection(path: Path) -> bool:
+    """Return whether one model path is a symbolic link or Windows junction."""
+    return path.is_symlink() or path.is_junction()
+
+
 def get_transformer_model_directory() -> Path:
     """Return the backend project's Saved Transformer Model directory."""
     backend_root = Path(__file__).resolve().parents[3]
     return backend_root / ".data"
+
+
+def _resolve_transformer_model_directory() -> tuple[Path, Path]:
+    """Return the genuine model directory and its resolved containment root."""
+    model_directory = get_transformer_model_directory()
+
+    if _path_is_transformer_model_indirection(model_directory):
+        raise ValueError("Saved Transformer Model directory cannot be path-indirected.")
+
+    if not model_directory.is_dir():
+        raise ValueError("Saved Transformer Model directory must be an ordinary directory.")
+
+    resolved_directory = model_directory.resolve(strict=True)
+
+    if not resolved_directory.is_dir():
+        raise ValueError("Saved Transformer Model directory must resolve to a directory.")
+
+    return model_directory, resolved_directory
+
+
+def _select_named_transformer_model_file(
+    model_filename: object,
+) -> _SelectedTransformerModelFile:
+    """Select one exact ordinary direct-entry model file without opening it."""
+    _parse_transformer_model_filename(model_filename)
+    requested_filename = cast(str, model_filename)
+    model_directory, resolved_directory = _resolve_transformer_model_directory()
+
+    selected_path: Path | None = None
+
+    for entry in model_directory.iterdir():
+        if entry.name == requested_filename:
+            selected_path = entry
+            break
+
+    if selected_path is None:
+        raise FileNotFoundError("Exact Saved Transformer Model entry was not found.")
+
+    if _path_is_transformer_model_indirection(selected_path):
+        raise ValueError("Saved Transformer Model candidate cannot be path-indirected.")
+
+    if not selected_path.is_file():
+        raise ValueError("Saved Transformer Model candidate must be an ordinary file.")
+
+    resolved_candidate = selected_path.resolve(strict=True)
+
+    if resolved_candidate.parent != resolved_directory:
+        raise ValueError("Saved Transformer Model candidate escaped its model directory.")
+
+    return _SelectedTransformerModelFile(
+        model_filename=requested_filename,
+        path=selected_path,
+    )
+
+
+def _build_unique_json_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    """Build one insertion-ordered JSON object while rejecting duplicate keys."""
+    result: dict[str, object] = {}
+
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Saved Transformer Model JSON objects cannot contain duplicate keys.")
+
+        result[key] = value
+
+    return result
+
+
+def _reject_nonfinite_json_constant(value: str) -> NoReturn:
+    """Reject non-standard NaN and infinity constants during JSON parsing."""
+    raise ValueError(f"Saved Transformer Model JSON constant {value!r} is unsupported.")
+
+
+def _parse_saved_transformer_model_document(
+    document_bytes: bytes,
+) -> object:
+    """Decode and parse one captured UTF-8 model document in memory."""
+    document_text = document_bytes.decode("utf-8")
+
+    parsed_document: object = json.loads(
+        document_text,
+        object_pairs_hook=_build_unique_json_object,
+        parse_constant=_reject_nonfinite_json_constant,
+    )
+
+    return parsed_document
+
+
+def _validate_loaded_transformer_model_document(
+    parsed_document: object,
+    *,
+    model_filename: str,
+) -> _ValidatedTransformerModelDocument:
+    """Strictly validate one parsed current Phase 5 model document."""
+    model_mapping = _require_exact_dictionary(
+        parsed_document,
+        name="Loaded Saved Transformer Model",
+        expected_keys=_MODEL_KEYS,
+    )
+    model = cast(SavedTransformerModel, model_mapping)
+    num_layers = _validate_saved_transformer_model_structure(model)
+
+    _, filename_num_layers = _parse_transformer_model_filename(model_filename)
+
+    if filename_num_layers != num_layers:
+        raise ValueError(
+            "Saved Transformer Model filename layer count must equal config numLayers."
+        )
+
+    config = cast(SavedTransformerConfig, model_mapping["config"])
+    layout = build_transformer_parameter_layout(num_layers)
+
+    if config["vocabSize"] != layout.vocabulary_size:
+        raise ValueError(
+            "Saved Transformer Model vocabSize must equal the canonical Vocabulary size."
+        )
+
+    preprocessing = get_transformer_preprocessing()
+    vocabulary = cast(list[str], model_mapping["vocab"])
+
+    if len(set(vocabulary)) != len(vocabulary):
+        raise ValueError("Saved Transformer Model Vocabulary entries must be unique.")
+
+    if tuple(vocabulary) != preprocessing.vocabulary:
+        raise ValueError(
+            "Saved Transformer Model Vocabulary must match the current Phase 5 ordering."
+        )
+
+    merges = cast(list[SavedTransformerMerge], model_mapping["merges"])
+
+    if len(merges) != len(preprocessing.merges):
+        raise ValueError(
+            "Saved Transformer Model Merge Table must match the current Phase 5 length."
+        )
+
+    for merge_index, (saved_merge, expected_merge) in enumerate(
+        zip(
+            merges,
+            preprocessing.merges,
+            strict=True,
+        )
+    ):
+        pair = saved_merge["pair"]
+        merged = saved_merge["merged"]
+
+        if merged != pair[0] + pair[1]:
+            raise ValueError(
+                f"Saved Transformer Model merge {merge_index} "
+                "must coherently concatenate its pair."
+            )
+
+        if tuple(pair) != expected_merge.pair or merged != expected_merge.merged:
+            raise ValueError(
+                "Saved Transformer Model Merge Table must match " "the current Phase 5 ordering."
+            )
+
+    weights = cast(SavedTransformerWeights, model_mapping["weights"])
+
+    return _ValidatedTransformerModelDocument(
+        model_filename=model_filename,
+        config=config,
+        vocabulary=vocabulary,
+        merges=merges,
+        weights=weights,
+        layout=layout,
+    )
+
+
+def _saved_parameter_values_for_layout_record(
+    weights: SavedTransformerWeights,
+    record: TransformerParameterLayoutRecord,
+) -> list[object]:
+    """Return one already-validated parameter list by canonical layout record."""
+    weight_mapping = cast(dict[str, object], weights)
+
+    if record.block_index is None:
+        return cast(list[object], weight_mapping[record.key])
+
+    blocks = cast(
+        list[dict[str, object]],
+        weight_mapping["blocks"],
+    )
+
+    return cast(
+        list[object],
+        blocks[record.block_index][record.key],
+    )
+
+
+def _materialize_float32_coordinate(
+    value: object,
+    *,
+    name: str,
+) -> np.float32:
+    """Convert one strict ordinary JSON number into one finite float32 value."""
+    if type(value) not in (int, float):
+        raise TypeError(f"{name} must be an ordinary JSON number.")
+
+    try:
+        numeric_value = float(cast(int | float, value))
+    except OverflowError as error:
+        raise ValueError(f"{name} is outside the supported numerical range.") from error
+
+    if not math.isfinite(numeric_value):
+        raise ValueError(f"{name} must be finite.")
+
+    try:
+        with np.errstate(over="raise", invalid="raise"):
+            materialized = np.float32(numeric_value)
+    except FloatingPointError as error:
+        raise ValueError(f"{name} cannot be represented as float32.") from error
+
+    if not np.isfinite(materialized):
+        raise ValueError(f"{name} cannot be represented as finite float32.")
+
+    return materialized
+
+
+def _materialize_transformer_parameters(
+    document: _ValidatedTransformerModelDocument,
+) -> InitializedTransformerParameters:
+    """Materialize exact saved coordinates into one canonical owned storage block."""
+    layout = document.layout
+    storage = np.empty(
+        layout.total_float_count,
+        dtype=np.float32,
+        order="C",
+    )
+
+    for record in layout.records:
+        saved_values = _saved_parameter_values_for_layout_record(
+            document.weights,
+            record,
+        )
+
+        if len(saved_values) != record.length:
+            raise ValueError(
+                "Saved Transformer Model parameter length "
+                "does not match its canonical layout record."
+            )
+
+        target = storage[record.float_offset : record.float_stop]
+
+        for coordinate_index, saved_value in enumerate(saved_values):
+            target[coordinate_index] = _materialize_float32_coordinate(
+                saved_value,
+                name=("Saved Transformer Model parameter " f"{record.key}[{coordinate_index}]"),
+            )
+
+    if (
+        storage.dtype != np.dtype(np.float32)
+        or storage.shape != (layout.total_float_count,)
+        or not storage.flags.c_contiguous
+        or not storage.flags.writeable
+        or not storage.flags.owndata
+        or not bool(np.all(np.isfinite(storage)))
+    ):
+        raise RuntimeError("Saved Transformer Model parameters were not materialized canonically.")
+
+    views = build_transformer_parameter_views(
+        storage,
+        layout,
+    )
+
+    return InitializedTransformerParameters(
+        layout=layout,
+        storage=storage,
+        views=views,
+    )
+
+
+def _build_loaded_transformer_model_snapshot(
+    document: _ValidatedTransformerModelDocument,
+) -> LoadedTransformerModelSnapshot:
+    """Copy validated metadata and attach freshly materialized parameters."""
+    config = SavedTransformerConfig(
+        vocabSize=document.config["vocabSize"],
+        contextLen=document.config["contextLen"],
+        embDim=document.config["embDim"],
+        numHeads=document.config["numHeads"],
+        ffDim=document.config["ffDim"],
+        numLayers=document.config["numLayers"],
+    )
+
+    vocabulary = list(document.vocabulary)
+
+    merges = [
+        SavedTransformerMerge(
+            pair=list(merge["pair"]),
+            merged=merge["merged"],
+        )
+        for merge in document.merges
+    ]
+
+    parameters = _materialize_transformer_parameters(document)
+
+    return LoadedTransformerModelSnapshot(
+        model_filename=document.model_filename,
+        config=config,
+        vocabulary=vocabulary,
+        merges=merges,
+        parameters=parameters,
+    )
+
+
+def load_named_transformer_model(
+    model_filename: str,
+) -> LoadedTransformerModelSnapshot:
+    """Load one exact named model into a complete request-owned snapshot."""
+    try:
+        selected_model = _select_named_transformer_model_file(model_filename)
+        document_bytes = selected_model.path.read_bytes()
+        parsed_document = _parse_saved_transformer_model_document(document_bytes)
+        validated_document = _validate_loaded_transformer_model_document(
+            parsed_document,
+            model_filename=selected_model.model_filename,
+        )
+
+        return _build_loaded_transformer_model_snapshot(validated_document)
+    except (MemoryError, OSError, RuntimeError, TypeError, ValueError):
+        raise SavedTransformerModelLoadError(_SAVED_TRANSFORMER_MODEL_LOAD_FAILURE) from None
 
 
 def get_transformer_model_filename(

@@ -2124,7 +2124,7 @@ def _validate_token_ids(
             raise TypeError(f"Every {name} entry must be an integer.")
 
         if token_id < 0 or token_id >= vocabulary_size:
-            raise ValueError(f"Every {name} entry must be between 0 and " f"{vocabulary_size - 1}.")
+            raise ValueError(f"Every {name} entry must be between 0 and {vocabulary_size - 1}.")
 
         validated.append(token_id)
 
@@ -2826,15 +2826,13 @@ def _validate_forward_result(
         for head_index, head in enumerate(block.attention_heads):
             _validate_float32_array(
                 head.scores,
-                name=(f"forward.blocks[{block_index}]" f".attention_heads[{head_index}].scores"),
+                name=(f"forward.blocks[{block_index}].attention_heads[{head_index}].scores"),
                 shape=(sequence_length, sequence_length),
                 allow_negative_infinity=True,
             )
             _validate_float32_array(
                 head.probabilities,
-                name=(
-                    f"forward.blocks[{block_index}]" f".attention_heads[{head_index}].probabilities"
-                ),
+                name=(f"forward.blocks[{block_index}].attention_heads[{head_index}].probabilities"),
                 shape=(sequence_length, sequence_length),
             )
 
@@ -3142,7 +3140,7 @@ def _backward_transformer_block(
     feed_forward_pre_activation_gradient = _materialize_float32(
         feed_forward_activation_gradient.astype(np.float64)
         * (cache.feed_forward_pre_activation > np.float32(0.0)).astype(np.float64),
-        name=(f"block {block_index} feed-forward " "pre-activation gradient"),
+        name=(f"block {block_index} feed-forward pre-activation gradient"),
     )
 
     _accumulate_array_in_place(
@@ -3237,25 +3235,25 @@ def _backward_transformer_block(
             cache.query,
             feature_start,
             feature_stop,
-            name=(f"block {block_index} head {head_index} " "cached query"),
+            name=(f"block {block_index} head {head_index} cached query"),
         )
         key_head = _copy_column_slice(
             cache.key,
             feature_start,
             feature_stop,
-            name=(f"block {block_index} head {head_index} " "cached key"),
+            name=(f"block {block_index} head {head_index} cached key"),
         )
         value_head = _copy_column_slice(
             cache.value,
             feature_start,
             feature_stop,
-            name=(f"block {block_index} head {head_index} " "cached value"),
+            name=(f"block {block_index} head {head_index} cached value"),
         )
         weighted_value_gradient = _copy_column_slice(
             concatenated_attention_gradient,
             feature_start,
             feature_stop,
-            name=(f"block {block_index} head {head_index} " "weighted-value gradient"),
+            name=(f"block {block_index} head {head_index} weighted-value gradient"),
         )
 
         probability_gradient = matmul_transposed_right(
@@ -3269,7 +3267,7 @@ def _backward_transformer_block(
         score_gradient = _causal_softmax_backward(
             probability_gradient,
             head_cache.probabilities,
-            name=(f"block {block_index} head {head_index} " "attention-score gradient"),
+            name=(f"block {block_index} head {head_index} attention-score gradient"),
         )
         head_query_gradient = scalar_multiply(
             matmul(
@@ -3360,20 +3358,20 @@ def _backward_transformer_block(
                 key_gradient,
                 parameters.w_k,
             ),
-            name=(f"block {block_index} " "query-key input gradient"),
+            name=(f"block {block_index} query-key input gradient"),
         ),
         matmul_transposed_right(
             value_gradient,
             parameters.w_v,
         ),
-        name=(f"block {block_index} " "complete attention input gradient"),
+        name=(f"block {block_index} complete attention input gradient"),
     )
 
     first_normalization_backward = _layer_normalization_backward(
         first_normalization_output_gradient,
         cache.first_normalization,
         parameters.ln1_gamma,
-        name=(f"block {block_index} " "first normalization"),
+        name=(f"block {block_index} first normalization"),
     )
 
     _accumulate_array_in_place(
@@ -3548,8 +3546,7 @@ def calculate_transformer_sequence(
 
     if len(sequence.input_ids) != TRANSFORMER_SEQUENCE_LENGTH:
         raise ValueError(
-            "A Transformer Training Sequence input must contain "
-            f"{TRANSFORMER_SEQUENCE_LENGTH} IDs."
+            f"A Transformer Training Sequence input must contain {TRANSFORMER_SEQUENCE_LENGTH} IDs."
         )
 
     if len(sequence.target_ids) != TRANSFORMER_SEQUENCE_LENGTH:

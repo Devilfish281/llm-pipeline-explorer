@@ -79,7 +79,7 @@ def _validate_same_shape(
     """Require exact shape equality for a non-broadcasting operation."""
     if left.shape != right.shape:
         raise ValueError(
-            f"{operation_name} requires equal shapes; " f"received {left.shape} and {right.shape}."
+            f"{operation_name} requires equal shapes; received {left.shape} and {right.shape}."
         )
 
 
@@ -140,7 +140,7 @@ def _materialize_float32(
 
     if not np.isfinite(result).all():
         raise FloatingPointError(
-            f"{operation_name} overflowed or became non-finite " "when materialized."
+            f"{operation_name} overflowed or became non-finite when materialized."
         )
 
     return result
@@ -412,7 +412,7 @@ def add_row_bias(
 
     if validated_bias.shape != expected_shape:
         raise ValueError(
-            "bias must have shape exactly " f"{expected_shape}; received {validated_bias.shape}."
+            f"bias must have shape exactly {expected_shape}; received {validated_bias.shape}."
         )
 
     values = validated.astype(
@@ -548,7 +548,7 @@ def slice_rows(
 
     if validated_stop > validated.shape[0]:
         raise ValueError(
-            f"slice_rows stop {validated_stop} " f"exceeds row count {validated.shape[0]}."
+            f"slice_rows stop {validated_stop} exceeds row count {validated.shape[0]}."
         )
 
     values = validated[validated_start:validated_stop].astype(

@@ -1442,7 +1442,6 @@ def _assert_tracked_shared_memory_released(
 
 
 class _StubRuntime:
-
     def __init__(
         self,
         *,

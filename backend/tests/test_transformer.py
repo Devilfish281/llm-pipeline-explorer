@@ -687,9 +687,7 @@ def test_transformer_parameter_views_share_exact_storage(
     views.get(
         "wQ",
         0,
-    )[
-        0, 0
-    ] = np.float32(-123.5)
+    )[0, 0] = np.float32(-123.5)
 
     assert storage[wq_record.float_offset] == np.float32(-123.5)
 
@@ -701,15 +699,11 @@ def test_transformer_parameter_views_share_exact_storage(
 
     assert views.get(
         "headW",
-    ).reshape(-1)[
-        7
-    ] == np.float32(456.25)
+    ).reshape(-1)[7] == np.float32(456.25)
 
     views.get(
         "headB",
-    )[
-        -1
-    ] = np.float32(99.0)
+    )[-1] = np.float32(99.0)
 
     np.testing.assert_array_equal(
         storage[layout.total_float_count :],

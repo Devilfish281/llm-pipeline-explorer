@@ -344,7 +344,7 @@ def _assert_protocol_value_is_private(value: object) -> None:
         ),
     )
 
-    pytest.fail("Protocol value uses an unsupported runtime type: " f"{type(value)!r}")
+    pytest.fail(f"Protocol value uses an unsupported runtime type: {type(value)!r}")
 
 
 def _shared_array(
@@ -771,7 +771,7 @@ def test_protocol_validators_reject_wrong_class_version_types_and_commit_identit
 ) -> None:
     with pytest.raises(
         WorkerProtocolValidationError,
-        match=("^Worker protocol validation failed" "\\.$"),
+        match=("^Worker protocol validation failed\\.$"),
     ):
         validator(message)
 

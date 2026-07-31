@@ -151,15 +151,11 @@ The immutable application-wide result of processing the Transformer Training Cor
 _Avoid_: Request preprocessing, mutable preprocessing cache
 
 **Transformer Training Run**:
-One complete execution of decoder-only Transformer training using freshly initialized weights, the fixed Transformer Training Corpus, and one validated set of model, generation, and training parameters. It never loads, resumes, skips, or initializes training from a Saved Transformer Model.
-_Avoid_: Cached run, resumed run, Saved Transformer Generation Run, Embedding Training Run
-
-**Saved Transformer Generation Run**:
-One independent inference request that loads one validated Saved Transformer Model and generates a continuation from one starting prompt. It retains no conversational state and never changes, resumes, or initializes Transformer training.
-_Avoid_: Chat session, resumed training, Transformer Training Run, model cache
+One complete execution of decoder-only Transformer training using freshly initialized weights, the fixed Transformer Training Corpus, and one validated set of model, generation, and training parameters. A Transformer Training Run never loads, resumes, or skips training by using a previously saved model.
+_Avoid_: Cached run, resumed run, Embedding Training Run
 
 **Generated Text Sample**:
-Text produced during a Transformer Training Run from the Transformer’s current weights using the fixed corpus-derived seed tokens and the requested maximum token count, temperature, and top-p value. One Generated Text Sample is produced for every Transformer Epoch Update.
+Text produced autoregressively from the Transformer’s current weights using the fixed corpus-derived seed tokens and the requested maximum token count, temperature, and top-p value. One Generated Text Sample is produced for every Transformer Epoch Update.
 
 **Sample Random Stream**:
 The independent request-owned Mulberry32 stream used to produce one Generated Text Sample. Its seed is calculated as `(42 + epoch) modulo 2³²`, and it does not change Weight Initialization, training, or another sample’s random sequence.
@@ -172,12 +168,9 @@ _Avoid_: Epoch Update when the Learning Demo is ambiguous
 **Transformer Event Stream**:
 The ordered updates produced by one successful Transformer Training Run: one `init` event, approximately fifty `epoch` events containing Generated Text Samples, and exactly one `done` event after successful final-model persistence.
 
-**Saved Transformer Event Stream**:
-The ordered updates produced by one successful Saved Transformer Generation Run: one `loaded` event, one `result` event, and one `done` event. A failed run emits one safe `error` event instead of successful completion events.
-
 **Saved Transformer Model**:
-A complete JSON representation of a successfully completed Transformer Training Run for one model-training configuration, containing its configuration, BPE model data, and final trained parameters. It may be loaded for a Saved Transformer Generation Run but is never used as a training checkpoint, resume point, cache shortcut, or source of initial training weights.
-_Avoid_: Intermediate checkpoint, training cache, resumed model, training history, model registry
+The complete JSON representation of the latest successfully completed Transformer Training Run for one model-training configuration, containing configuration, BPE model data, and final trained parameters. Separate model-training configurations are retained under configuration-specific filenames, and saved models are never loaded as caches, resume points, or shortcuts for later requests.
+_Avoid_: Intermediate checkpoint, global latest-model file, model cache, training history, model registry
 
 **Logical Training Shard**:
 One of exactly four fixed, deterministic, contiguous subsets of the ordered Transformer Training Sequences. Shard identity does not depend on CPU count or operating-system worker count, and one worker process may execute more than one Logical Training Shard.
@@ -187,8 +180,8 @@ The deterministic combination of the four Logical Training Shard losses and grad
 _Avoid_: Completion-order reduction, CPU-dependent reduction
 
 **Request-Scoped Worker Group**:
-The one-through-four operating-system worker processes created for one Transformer Training Run, reused across that run’s epochs, and shut down before the request releases its remaining resources. Worker processes are never shared between independent HTTP requests and are not started for Saved Transformer Generation Runs.
-_Avoid_: Global worker pool, application-wide worker group, CPU core count
+The one-through-four operating-system worker processes created for one Transformer Training Run, reused across that run’s epochs, and shut down before the request releases its remaining resources. Worker processes are never shared between independent HTTP requests.
+_Avoid_: Global worker pool, application-wide worker group
 
 **Request-Scoped Shared Memory**:
 The five shared-memory regions owned by one Transformer Training Run: one flat weight block and four flat Logical Training Shard gradient blocks. They are never reused by another request and are released after the owning run completes, fails, is cancelled, or disconnects.

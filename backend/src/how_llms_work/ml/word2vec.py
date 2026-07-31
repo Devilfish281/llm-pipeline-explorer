@@ -548,7 +548,7 @@ class EmbeddingTrainingRun(Iterator[EmbeddingTrainingEvent]):
     ) -> float:
         """Return the linear learning rate for one inclusive epoch."""
         if epoch < 0 or epoch > self.epochs:
-            raise ValueError("epoch must be between " f"0 and {self.epochs}; " f"received {epoch}")
+            raise ValueError(f"epoch must be between 0 and {self.epochs}; received {epoch}")
 
         return LEARNING_RATE_START - (LEARNING_RATE_START - LEARNING_RATE_END) * (
             epoch / self.epochs
@@ -785,7 +785,7 @@ class EmbeddingTrainingRun(Iterator[EmbeddingTrainingEvent]):
             )
             or window_size not in preprocessing.training_pairs
         ):
-            raise ValueError(f"window_size {window_size} " "is not available in preprocessing")
+            raise ValueError(f"window_size {window_size} is not available in preprocessing")
 
         if (
             not isinstance(
@@ -811,13 +811,13 @@ class EmbeddingTrainingRun(Iterator[EmbeddingTrainingEvent]):
             )
             or negative_samples < 0
         ):
-            raise ValueError("negative_samples must be " "a non-negative integer")
+            raise ValueError("negative_samples must be a non-negative integer")
 
         if not preprocessing.vocabulary:
-            raise ValueError("preprocessing vocabulary " "must not be empty")
+            raise ValueError("preprocessing vocabulary must not be empty")
 
         if not preprocessing.training_pairs[window_size]:
-            raise ValueError("selected Training Pair sequence " "must not be empty")
+            raise ValueError("selected Training Pair sequence must not be empty")
 
         vocabulary_size = len(preprocessing.vocabulary)
 
@@ -825,14 +825,14 @@ class EmbeddingTrainingRun(Iterator[EmbeddingTrainingEvent]):
             frequency = preprocessing.token_frequencies.get(token)
 
             if frequency is None or frequency <= 0:
-                raise ValueError("every Vocabulary Token must " "have a positive frequency")
+                raise ValueError("every Vocabulary Token must have a positive frequency")
 
         for pair in preprocessing.training_pairs[window_size]:
             if not (0 <= pair.target < vocabulary_size):
-                raise ValueError("Training Pair target index " "is out of range")
+                raise ValueError("Training Pair target index is out of range")
 
             if not (0 <= pair.context < vocabulary_size):
-                raise ValueError("Training Pair context index " "is out of range")
+                raise ValueError("Training Pair context index is out of range")
 
     def _build_cumulative_distribution(
         self,
@@ -865,7 +865,7 @@ class EmbeddingTrainingRun(Iterator[EmbeddingTrainingEvent]):
             )
 
         if power_sum <= 0.0:
-            raise ValueError("negative-sampling sum " "must be positive")
+            raise ValueError("negative-sampling sum must be positive")
 
         cumulative = np.empty(
             vocabulary_size,
@@ -879,7 +879,7 @@ class EmbeddingTrainingRun(Iterator[EmbeddingTrainingEvent]):
 
             self._require_finite(
                 running_total,
-                "negative-sampling " "cumulative probability",
+                "negative-sampling cumulative probability",
             )
 
             cumulative[index] = running_total
@@ -1038,13 +1038,13 @@ class EmbeddingTrainingRun(Iterator[EmbeddingTrainingEvent]):
         self,
     ) -> CompletedEmbeddingTraining:
         if self._last_loss is None:
-            raise RuntimeError("Embedding Training Run " "has not trained any epochs")
+            raise RuntimeError("Embedding Training Run has not trained any epochs")
 
         if not np.isfinite(self.input_weights).all():
-            raise FloatingPointError("input weights contain " "a non-finite value")
+            raise FloatingPointError("input weights contain a non-finite value")
 
         if not np.isfinite(self.output_weights).all():
-            raise FloatingPointError("output weights contain " "a non-finite value")
+            raise FloatingPointError("output weights contain a non-finite value")
 
         self._require_finite(
             self._last_loss,
@@ -1274,7 +1274,7 @@ def _resolve_query_words(
             )
             warnings.append(
                 f'"{submitted_word}" is not a single BPE token — '
-                f'it splits into [{", ".join(bpe_tokens)}]'
+                f"it splits into [{', '.join(bpe_tokens)}]"
             )
             continue
 
