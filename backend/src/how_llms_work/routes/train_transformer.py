@@ -1472,6 +1472,9 @@ async def stream_transformer_training(
             poll_observer=observe_worker_poll,
         )
 
+        actual_worker_count = worker_group.actual_worker_count  #  Added Code
+        first_public_sample_pending = True  #  Added Code
+
         while training_run.is_active:
             await _raise_if_transformer_client_disconnected(
                 request,
@@ -1526,12 +1529,21 @@ async def stream_transformer_training(
                 }
             )
 
+            public_sample = generated_sample.text  #  Added Code
+
+            if first_public_sample_pending:  #  Added Code
+                public_sample = (  #  Added Code
+                    f"Transformer worker processes: {actual_worker_count}\n\n"  #  Added Code
+                    f"{generated_sample.text}"  #  Added Code
+                )
+                first_public_sample_pending = False  #  Added Code
+
             yield format_sse(
                 "epoch",
                 {
                     "epoch": update.epoch,
                     "loss": update.loss,
-                    "sample": generated_sample.text,
+                    "sample": public_sample,  #  Changed Code
                 },
             )
 

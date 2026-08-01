@@ -2268,6 +2268,11 @@ class RequestScopedWorkerGroup:
         """Return the current stable parent-side lifecycle state."""
         return self._state
 
+    @property  #  Added Code
+    def actual_worker_count(self) -> int:  #  Added Code
+        """Return the worker-process count selected for this training run."""
+        return self._actual_worker_count  #  Added Code
+
     @property
     def cleanup_report(self) -> RequestScopedWorkerGroupCleanupReport | None:
         """Return the published immutable cleanup report, when available."""

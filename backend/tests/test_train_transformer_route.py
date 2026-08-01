@@ -546,11 +546,13 @@ class ControlledWorkerGroup:
         order: CallOrder,
         failures: set[str],
         compute_gate: threading.Event,
+        actual_worker_count: int,
     ) -> None:
         self.shards = shards
         self.order = order
         self.failures = failures
         self.compute_gate = compute_gate
+        self._actual_worker_count = actual_worker_count
         self.compute_started = threading.Event()
         self.compute_epochs: list[int] = []
         self.weight_ids: list[int] = []
@@ -568,6 +570,11 @@ class ControlledWorkerGroup:
 
         if "cleanup_blocked" not in failures:
             self.cleanup_gate.set()
+
+    @property
+    def actual_worker_count(self) -> int:
+        """Return the controlled worker-process count for this training run."""
+        return self._actual_worker_count
 
     @property
     def successful(self) -> bool:
@@ -719,6 +726,7 @@ def install_dependencies(
     *,
     failures: set[str] | None = None,
     block_epoch: bool = False,
+    actual_worker_count: int = 3,
 ) -> Dependencies:
     """Install narrow doubles around expensive public boundaries."""
     order = CallOrder()
@@ -840,6 +848,7 @@ def install_dependencies(
             order,
             active_failures,
             compute_gate,
+            actual_worker_count=actual_worker_count,
         )
 
         groups.append(result)
@@ -2416,9 +2425,30 @@ def test_train_transformer_sequential_requests_use_fresh_mutable_state(
     assert first_status == 200
 
     first_events = parse_sse(first_body).events
+    first_epoch_events = tuple(  #  Added Code
+        event for event in first_events if event.name == "epoch"  #  Added Code
+    )  #  Added Code
+    first_worker_label = f"Transformer worker processes: {first.groups[0].actual_worker_count}"  #  Added Code  #  Added Code  #  Added Code
 
     assert first_events[-1].name == "done"
     assert first_events[-1].payload["samples"][-1]["epoch"] == 50
+    assert first_epoch_events[0].payload["sample"] == (  #  Added Code
+        f"{first_worker_label}\n\ncontrolled sample 0"  #  Added Code
+    )  #  Added Code
+    assert first_epoch_events[1].payload["sample"] == "controlled sample 1"  #  Added Code
+    assert first_body.count("Transformer worker processes") == 1  #  Added Code
+    assert all(  #  Added Code
+        "Transformer worker processes" not in event.payload["sample"]  #  Added Code
+        for event in first_epoch_events[1:]  #  Added Code
+    )  #  Added Code
+    assert first_events[-1].payload["samples"][0] == {  #  Added Code
+        "epoch": 0,  #  Added Code
+        "text": "controlled sample 0",  #  Added Code
+    }  #  Added Code
+    assert all(  #  Added Code
+        "Transformer worker processes" not in sample["text"]  #  Added Code
+        for sample in first_events[-1].payload["samples"]  #  Added Code
+    )  #  Added Code
 
     second = install_dependencies(
         monkeypatch,
@@ -2430,9 +2460,30 @@ def test_train_transformer_sequential_requests_use_fresh_mutable_state(
     assert second_status == 200
 
     second_events = parse_sse(second_body).events
+    second_epoch_events = tuple(  #  Added Code
+        event for event in second_events if event.name == "epoch"  #  Added Code
+    )  #  Added Code
+    second_worker_label = f"Transformer worker processes: {second.groups[0].actual_worker_count}"  #  Added Code  #  Added Code  #  Added Code
 
     assert second_events[-1].name == "done"
     assert second_events[-1].payload["samples"][-1]["epoch"] == 50
+    assert second_epoch_events[0].payload["sample"] == (  #  Added Code
+        f"{second_worker_label}\n\ncontrolled sample 0"  #  Added Code
+    )  #  Added Code
+    assert second_epoch_events[1].payload["sample"] == "controlled sample 1"  #  Added Code
+    assert second_body.count("Transformer worker processes") == 1  #  Added Code
+    assert all(  #  Added Code
+        "Transformer worker processes" not in event.payload["sample"]  #  Added Code
+        for event in second_epoch_events[1:]  #  Added Code
+    )  #  Added Code
+    assert second_events[-1].payload["samples"][0] == {  #  Added Code
+        "epoch": 0,  #  Added Code
+        "text": "controlled sample 0",  #  Added Code
+    }  #  Added Code
+    assert all(  #  Added Code
+        "Transformer worker processes" not in sample["text"]  #  Added Code
+        for sample in second_events[-1].payload["samples"]  #  Added Code
+    )  #  Added Code
 
     assert first.parameters[0] is not second.parameters[0]
     assert not np.shares_memory(
@@ -2559,10 +2610,14 @@ def test_train_transformer_headers_payloads_and_lifecycle_order_are_exact(
         "done",
     )
 
+    worker_label = f"Transformer worker processes: {dependencies.groups[0].actual_worker_count}"
     expected_samples: list[dict[str, object]] = []
+    public_samples: list[str] = []
 
     for epoch, event in enumerate(parsed.events[1:-1]):
         text = f"controlled sample {epoch}"
+        public_text = f"{worker_label}\n\n{text}" if epoch == 0 else text
+        public_samples.append(public_text)
 
         expected_samples.append(
             {
@@ -2577,13 +2632,16 @@ def test_train_transformer_headers_payloads_and_lifecycle_order_are_exact(
                 1.0 / float(epoch + 1),
                 6,
             ),
-            "sample": text,
+            "sample": public_text,  #  Changed Code
         }
         assert set(event.payload) == {
             "epoch",
             "loss",
             "sample",
         }
+
+    assert sum(sample.count("Transformer worker processes") for sample in public_samples) == 1
+    assert body.count("Transformer worker processes") == 1
 
     assert parsed.events[-1].payload == {
         "architecture": ("Decoder-Only Transformer (2 layers, 32d, 2h, 128ff)"),
@@ -2632,6 +2690,40 @@ def test_train_transformer_headers_payloads_and_lifecycle_order_are_exact(
     assert dependencies.runs[0].result_counts == [4] * 51
     assert dependencies.groups[0].compute_epochs == list(range(51))
     assert dependencies.slot.locked() is False
+
+
+@pytest.mark.parametrize("actual_worker_count", (1, 2, 4))
+def test_train_transformer_first_sample_uses_controlled_actual_worker_count(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    actual_worker_count: int,
+) -> None:
+    dependencies = install_dependencies(
+        monkeypatch,
+        tmp_path,
+        actual_worker_count=actual_worker_count,
+    )
+
+    status, _headers, body = post_request()
+
+    assert status == 200
+
+    parsed = parse_sse(body)
+    epoch_events = parsed.events[1:-1]
+    worker_label = f"Transformer worker processes: {actual_worker_count}"
+
+    assert dependencies.groups[0].actual_worker_count == actual_worker_count
+    assert epoch_events[0].payload["sample"] == (f"{worker_label}\n\ncontrolled sample 0")
+    assert epoch_events[1].payload["sample"] == "controlled sample 1"
+    assert (
+        sum("Transformer worker processes" in event.payload["sample"] for event in epoch_events)
+        == 1
+    )
+    assert body.count("Transformer worker processes") == 1
+    assert parsed.events[-1].payload["samples"][0] == {
+        "epoch": 0,
+        "text": "controlled sample 0",
+    }
 
 
 def test_train_transformer_overlap_is_429_with_no_second_run_work(

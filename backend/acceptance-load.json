@@ -1,0 +1,7 @@
+﻿{
+  "temperature": 1.0,
+  "topP": 0.6,
+  "maxTokens": 3,
+  "prompt": "once upon a time",
+  "modelFile": "transformer-weights-e50-l1-d32-h2-ff128-ctx32.json"
+}

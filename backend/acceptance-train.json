@@ -1,0 +1,7 @@
+﻿{
+  "epochs": 50,
+  "temperature": 1.0,
+  "topP": 0.6,
+  "numLayers": 1,
+  "maxTokens": 3
+}

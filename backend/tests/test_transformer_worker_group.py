@@ -1556,13 +1556,19 @@ def test_worker_shard_assignments_are_static_complete_and_ordered(
     assert all(worker_shards == tuple(sorted(worker_shards)) for worker_shards in assignments)
 
 
-@pytest.mark.asyncio
 async def test_group_reads_cpu_count_once_and_retains_static_assignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     num_layers, weights, sequences, shards = _group_inputs()
     runtime = _StubRuntime(results=_shard_results(shards))
     cpu_count_calls = 0
+
+    worker_count_property = inspect.getattr_static(  #  Added Code
+        RequestScopedWorkerGroup,  #  Added Code
+        "actual_worker_count",  #  Added Code
+    )
+    assert isinstance(worker_count_property, property)  #  Added Code
+    assert worker_count_property.fset is None  #  Added Code
 
     def fake_cpu_count() -> int:
         nonlocal cpu_count_calls
@@ -1584,13 +1590,19 @@ async def test_group_reads_cpu_count_once_and_retains_static_assignment(
         _runtime=runtime,
     )
 
+    assert group.actual_worker_count == 3  #  Added Code
     assert cpu_count_calls == 1
     assert runtime.actual_worker_count == 3
     assert runtime.assigned_shard_ids_by_worker == ((0, 3), (1,), (2,))
 
     await group.compute_epoch(0, weights)
+
+    assert group.actual_worker_count == 3  #  Added Code
+    assert cpu_count_calls == 1  #  Added Code
+
     await group.cleanup()
 
+    assert group.actual_worker_count == 3  #  Added Code
     assert cpu_count_calls == 1
 
 
