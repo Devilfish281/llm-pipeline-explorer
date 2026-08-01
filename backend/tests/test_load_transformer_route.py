@@ -1,12 +1,16 @@
 # backend/tests/test_load_transformer_route.py
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Final
-from unittest.mock import Mock
+from typing import Any, Final, cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI
@@ -47,6 +51,10 @@ UNSUPPORTED_PROMPT_FAILURE: Final = (
 LONG_PROMPT_FAILURE: Final = "The prompt must contain no more than 16 tokens."
 OVERLAP_FAILURE: Final = "Another Transformer request is already running."
 START_FAILURE: Final = "Saved Transformer generation could not start."
+GENERATION_FAILURE: Final = "The saved Transformer model could not generate text."
+GENERATION_TIMEOUT_FAILURE: Final = "Saved Transformer generation exceeded its time limit."
+TEST_WAIT_SECONDS: Final = 5.0
+TEST_ASYNC_TIMEOUT_SECONDS: Final = 1.0
 
 
 PUBLIC_REQUEST_FIELDS: Final = (
@@ -131,11 +139,26 @@ class ControlledGeneratedText(str):
 
 
 @dataclass(slots=True)
+class LifecycleOrderRecorder:
+    _entries: list[str] = field(default_factory=list)
+    _guard: threading.Lock = field(default_factory=threading.Lock)
+
+    def add(self, entry: str) -> None:
+        with self._guard:
+            self._entries.append(entry)
+
+    def snapshot(self) -> tuple[str, ...]:
+        with self._guard:
+            return tuple(self._entries)
+
+
+@dataclass(slots=True)
 class ControlledRunSlot:
     allow_acquire: bool = True
     acquire_calls: int = 0
     release_calls: int = 0
     blocking_arguments: list[bool] = field(default_factory=list)
+    order: LifecycleOrderRecorder | None = None
     _locked: bool = False
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
@@ -157,8 +180,118 @@ class ControlledRunSlot:
         self.release_calls += 1
         self._locked = False
 
+        if self.order is not None:
+            self.order.add("slot released")
+
     def locked(self) -> bool:
         return self._locked
+
+
+class ControlledCancellationEvent(threading.Event):
+    def __init__(self, order: LifecycleOrderRecorder) -> None:
+        super().__init__()
+        self._order = order
+
+    def set(self) -> None:
+        if not self.is_set():
+            self._order.add("stop observed")
+
+        super().set()
+
+
+@dataclass(slots=True)
+class RequestCancellationEventFactory:
+    order: LifecycleOrderRecorder
+    events: list[ControlledCancellationEvent] = field(default_factory=list)
+
+    def __call__(self) -> ControlledCancellationEvent:
+        event = ControlledCancellationEvent(self.order)
+        self.events.append(event)
+        return event
+
+
+@dataclass(slots=True)
+class ControlledMonotonicClock:
+    values: list[float]
+    observed_values: list[float] = field(default_factory=list)
+
+    def __call__(self) -> float:
+        if not self.values:
+            raise AssertionError("The controlled monotonic clock needs at least one value.")
+
+        value = self.values.pop(0) if len(self.values) > 1 else self.values[0]
+        self.observed_values.append(value)
+        return value
+
+
+class ControlledEventLoop:
+    def __init__(
+        self,
+        actual_loop: asyncio.AbstractEventLoop,
+        clock: ControlledMonotonicClock,
+    ) -> None:
+        self._actual_loop = actual_loop
+        self._clock = clock
+
+    def time(self) -> float:
+        return self._clock()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._actual_loop, name)
+
+
+class ControlledAsyncioModule:
+    def __init__(
+        self,
+        actual_loop: asyncio.AbstractEventLoop,
+        clock: ControlledMonotonicClock,
+    ) -> None:
+        self._loop = ControlledEventLoop(actual_loop, clock)
+
+    def get_running_loop(self) -> ControlledEventLoop:
+        return self._loop
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(asyncio, name)
+
+
+@dataclass(slots=True)
+class ControlledTokenGenerator:
+    order: LifecycleOrderRecorder
+    started: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
+    calculation_count: int = 0
+    cancellation_events: list[threading.Event] = field(default_factory=list)
+
+    def __call__(
+        self,
+        parameters: object,
+        vocabulary: object,
+        prepared_prompt: object,
+        **kwargs: object,
+    ) -> ControlledGeneratedText:
+        del parameters, vocabulary, prepared_prompt
+
+        cancellation_event = cast(threading.Event, kwargs["cancellation_event"])
+        self.cancellation_events.append(cancellation_event)
+
+        for _ in range(2):
+            if cancellation_event.is_set():
+                break
+
+            self.calculation_count += 1
+
+            if self.calculation_count == 1:
+                self.order.add("helper started")
+                self.started.set()
+
+                if not cancellation_event.wait(TEST_WAIT_SECONDS):
+                    raise AssertionError("The controlled token calculation was not stopped.")
+
+                self.order.add("helper finished")
+                self.finished.set()
+
+        return ControlledGeneratedText(GENERATED_TEXT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +301,17 @@ class ControlledLoadDependencies:
     latest_loader: Mock
     prompt_preparation: Mock
     generator: Mock
+
+
+@dataclass(frozen=True, slots=True)
+class ControlledLifecycleDependencies:
+    slot: ControlledRunSlot
+    loader: Mock
+    latest_loader: Mock
+    prompt_preparation: Mock
+    generator: Mock
+    order: LifecycleOrderRecorder
+    cancellation_event_factory: RequestCancellationEventFactory
 
 
 @dataclass(slots=True)
@@ -479,6 +623,34 @@ def _install_controlled_dependencies(
     )
 
 
+def _install_lifecycle_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> ControlledLifecycleDependencies:
+    order = LifecycleOrderRecorder()
+    slot = ControlledRunSlot(order=order)
+    controlled = _install_controlled_dependencies(
+        monkeypatch,
+        slot=slot,
+    )
+    cancellation_event_factory = RequestCancellationEventFactory(order)
+
+    monkeypatch.setattr(
+        train_transformer_route,
+        "Event",
+        cancellation_event_factory,
+    )
+
+    return ControlledLifecycleDependencies(
+        slot=controlled.slot,
+        loader=controlled.loader,
+        latest_loader=controlled.latest_loader,
+        prompt_preparation=controlled.prompt_preparation,
+        generator=controlled.generator,
+        order=order,
+        cancellation_event_factory=cancellation_event_factory,
+    )
+
+
 def _post_load_transformer(
     payload: dict[str, object],
     *,
@@ -513,6 +685,44 @@ def _post_train_transformer(
                 "maxTokens": 3,
             },
         )
+
+
+async def _collect_saved_transformer_stream(
+    stream: AsyncIterator[str],
+) -> tuple[SSEEvent, ...]:
+    chunks: list[str] = []
+
+    async for chunk in stream:
+        chunks.append(chunk)
+
+    return _parse_sse("".join(chunks))
+
+
+def _assert_controlled_success_response(
+    response: Response,
+    *,
+    selected_filename: str = MODEL_FILENAME,
+) -> None:
+    _assert_sse_response_headers(response)
+    _assert_private_details_are_absent(response.text)
+
+    assert _parse_sse(response.text) == (
+        SSEEvent(
+            name="loaded",
+            payload={
+                "file": selected_filename,
+                "prompt": TRIMMED_PROMPT,
+            },
+        ),
+        SSEEvent(
+            name="result",
+            payload={"text": GENERATED_TEXT},
+        ),
+        SSEEvent(
+            name="done",
+            payload={},
+        ),
+    )
 
 
 def create_request_validation_app(
@@ -601,6 +811,16 @@ def _assert_one_error_event(
 
 def test_load_transformer_route_is_registered_and_existing_routes_remain() -> None:
     assert REQUIRED_ROUTES <= _registered_methods()
+
+
+def test_transformer_route_descriptions_state_process_local_slot_scope() -> None:
+    paths = app.openapi()["paths"]
+
+    training_description = paths["/train-transformer"]["post"]["description"]
+    loading_description = paths["/load-transformer"]["post"]["description"]
+
+    assert "shared process-local slot" in training_description
+    assert "shared process-local slot" in loading_description
 
 
 def test_load_transformer_request_model_declares_exact_fields_and_aliases() -> None:
@@ -1110,6 +1330,58 @@ def test_load_transformer_generation_failures_are_stable_private_and_terminal(
         pytest.param(None, LATEST_MODEL_FILENAME, id="latest"),
     ],
 )
+def test_load_transformer_operation_timeout_is_generic_not_route_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    model_file: str | None,
+    selected_filename: str,
+) -> None:
+    dependencies = _install_controlled_dependencies(
+        monkeypatch,
+        generator_side_effect=TimeoutError("private-operation-timeout"),
+    )
+
+    response = _post_load_transformer(
+        _valid_request(modelFile=model_file),
+        raise_server_exceptions=False,
+    )
+
+    _assert_sse_response_headers(response)
+    assert "private-operation-timeout" not in response.text
+    assert _parse_sse(response.text) == (
+        SSEEvent(
+            name="loaded",
+            payload={
+                "file": selected_filename,
+                "prompt": TRIMMED_PROMPT,
+            },
+        ),
+        SSEEvent(
+            name="error",
+            payload={"error": GENERATION_FAILURE},
+        ),
+    )
+    assert GENERATION_TIMEOUT_FAILURE not in response.text
+
+    if model_file is None:
+        dependencies.latest_loader.assert_called_once_with()
+        dependencies.loader.assert_not_called()
+    else:
+        dependencies.loader.assert_called_once_with(MODEL_FILENAME)
+        dependencies.latest_loader.assert_not_called()
+
+    dependencies.prompt_preparation.assert_called_once()
+    dependencies.generator.assert_called_once()
+    assert dependencies.slot.release_calls == 1
+    assert dependencies.slot.locked() is False
+
+
+@pytest.mark.parametrize(
+    ("model_file", "selected_filename"),
+    [
+        pytest.param(MODEL_FILENAME, MODEL_FILENAME, id="named"),
+        pytest.param(None, LATEST_MODEL_FILENAME, id="latest"),
+    ],
+)
 @pytest.mark.parametrize(
     ("outcome", "first_payload", "expected_first_event_names"),
     [
@@ -1282,16 +1554,31 @@ def test_active_training_slot_rejects_load_without_queueing(
         slot=shared_slot,
     )
 
-    response = _post_load_transformer(_valid_request())
+    rejected_response = _post_load_transformer(_valid_request())
 
-    assert response.status_code == 429
-    assert response.json() == {"detail": OVERLAP_FAILURE}
+    assert rejected_response.status_code == 429
+    assert rejected_response.json() == {"detail": OVERLAP_FAILURE}
     assert shared_slot.acquire_calls == 1
     assert shared_slot.blocking_arguments == [False]
     assert shared_slot.release_calls == 0
     assert shared_slot.locked() is True
     dependencies.loader.assert_not_called()
     dependencies.generator.assert_not_called()
+
+    shared_slot.release()
+
+    dependencies.loader.assert_not_called()
+    dependencies.generator.assert_not_called()
+
+    recovery_response = _post_load_transformer(_valid_request())
+
+    _assert_controlled_success_response(recovery_response)
+    assert shared_slot.acquire_calls == 2
+    assert shared_slot.blocking_arguments == [False, False]
+    assert shared_slot.release_calls == 2
+    assert shared_slot.locked() is False
+    dependencies.loader.assert_called_once_with(MODEL_FILENAME)
+    dependencies.generator.assert_called_once()
 
 
 def test_active_load_slot_rejects_training_without_queueing(
@@ -1314,15 +1601,22 @@ def test_active_load_slot_rejects_training_without_queueing(
         preprocessing_getter,
     )
 
-    response = _post_train_transformer()
+    rejected_response = _post_train_transformer()
 
-    assert response.status_code == 429
-    assert response.json() == {"detail": OVERLAP_FAILURE}
+    assert rejected_response.status_code == 429
+    assert rejected_response.json() == {"detail": OVERLAP_FAILURE}
     assert shared_slot.acquire_calls == 1
     assert shared_slot.blocking_arguments == [False]
     assert shared_slot.release_calls == 0
     assert shared_slot.locked() is True
     preprocessing_getter.assert_not_called()
+
+    shared_slot.release()
+
+    preprocessing_getter.assert_not_called()
+    assert shared_slot.acquire_calls == 1
+    assert shared_slot.release_calls == 1
+    assert shared_slot.locked() is False
 
 
 @pytest.mark.parametrize(
@@ -1433,6 +1727,7 @@ def test_identical_load_requests_preserve_request_isolation_with_distinct_snapsh
             object,
             object,
             object,
+            ControlledGeneratedText,
         ]
     ] = []
 
@@ -1442,16 +1737,18 @@ def test_identical_load_requests_preserve_request_isolation_with_distinct_snapsh
         prepared_prompt: object,
         **kwargs: object,
     ) -> ControlledGeneratedText:
+        generated_text = ControlledGeneratedText(GENERATED_TEXT)
         generation_inputs.append(
             (
                 parameters,
                 vocabulary,
                 prepared_prompt,
                 kwargs["cancellation_event"],
+                generated_text,
             )
         )
 
-        return ControlledGeneratedText(GENERATED_TEXT)
+        return generated_text
 
     dependencies.generator.side_effect = generate_from_request_snapshot
 
@@ -1479,19 +1776,37 @@ def test_identical_load_requests_preserve_request_isolation_with_distinct_snapsh
     )
     assert selected_loader.call_count == 2
     other_loader.assert_not_called()
+    assert dependencies.prompt_preparation.call_count == 2
     assert dependencies.generator.call_count == 2
+
+    first_prompt_call, second_prompt_call = dependencies.prompt_preparation.call_args_list
+
+    assert first_prompt_call.args == (
+        RAW_PROMPT,
+        first_snapshot.vocabulary,
+        first_snapshot.merges,
+    )
+    assert second_prompt_call.args == (
+        RAW_PROMPT,
+        second_snapshot.vocabulary,
+        second_snapshot.merges,
+    )
+    assert first_snapshot.vocabulary is not second_snapshot.vocabulary
+    assert first_snapshot.merges is not second_snapshot.merges
 
     (
         first_parameters,
         first_vocabulary,
         first_prompt,
         first_cancellation,
+        first_generated_text,
     ) = generation_inputs[0]
     (
         second_parameters,
         second_vocabulary,
         second_prompt,
         second_cancellation,
+        second_generated_text,
     ) = generation_inputs[1]
 
     assert first_parameters is first_snapshot.parameters
@@ -1501,7 +1816,172 @@ def test_identical_load_requests_preserve_request_isolation_with_distinct_snapsh
     assert second_vocabulary is second_snapshot.vocabulary
     assert first_vocabulary is not second_vocabulary
     assert first_prompt is not second_prompt
+    assert first_prompt.text == TRIMMED_PROMPT
+    assert second_prompt.text == TRIMMED_PROMPT
+    assert first_prompt.token_ids == second_prompt.token_ids
     assert first_cancellation is not second_cancellation
+    assert first_generated_text == second_generated_text
+    assert first_generated_text is not second_generated_text
+    assert dependencies.slot.acquire_calls == 2
+    assert dependencies.slot.release_calls == 2
+    assert dependencies.slot.locked() is False
+
+
+def test_named_and_latest_requests_keep_model_prompt_settings_and_output_aligned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    named_snapshot = _make_loaded_snapshot(
+        model_filename=MODEL_FILENAME,
+        parameters=object(),
+    )
+    latest_snapshot = _make_loaded_snapshot(
+        model_filename=LATEST_MODEL_FILENAME,
+        parameters=object(),
+    )
+    latest_snapshot.vocabulary[:] = [" ", "b", "a"]
+
+    dependencies = _install_controlled_dependencies(monkeypatch)
+    dependencies.loader.return_value = named_snapshot
+    dependencies.latest_loader.return_value = latest_snapshot
+    generation_calls: list[
+        tuple[
+            object,
+            object,
+            object,
+            float,
+            float,
+            int,
+            object,
+            ControlledGeneratedText,
+        ]
+    ] = []
+
+    def generate_aligned_request(
+        parameters: object,
+        vocabulary: object,
+        prepared_prompt: object,
+        **kwargs: object,
+    ) -> ControlledGeneratedText:
+        temperature = cast(float, kwargs["temperature"])
+        top_p = cast(float, kwargs["top_p"])
+        max_tokens = cast(int, kwargs["max_tokens"])
+        cancellation_event = kwargs["cancellation_event"]
+
+        if parameters is named_snapshot.parameters:
+            assert vocabulary is named_snapshot.vocabulary
+            assert prepared_prompt.text == "ab"
+            assert prepared_prompt.token_ids == (0, 1, 2)
+            assert temperature == 0.6
+            assert top_p == 0.7
+            assert max_tokens == 3
+            generated_text = ControlledGeneratedText("ab named-result")
+        elif parameters is latest_snapshot.parameters:
+            assert vocabulary is latest_snapshot.vocabulary
+            assert prepared_prompt.text == "ba"
+            assert prepared_prompt.token_ids == (0, 1, 2)
+            assert temperature == 1.4
+            assert top_p == 0.95
+            assert max_tokens == 4
+            generated_text = ControlledGeneratedText("ba latest-result")
+        else:
+            raise AssertionError("Generation received parameters from no selected request.")
+
+        generation_calls.append(
+            (
+                parameters,
+                vocabulary,
+                prepared_prompt,
+                temperature,
+                top_p,
+                max_tokens,
+                cancellation_event,
+                generated_text,
+            )
+        )
+
+        return generated_text
+
+    dependencies.generator.side_effect = generate_aligned_request
+
+    named_response = _post_load_transformer(
+        _valid_request(
+            modelFile=MODEL_FILENAME,
+            prompt="  ab  ",
+            temperature=0.6,
+            topP=0.7,
+            maxTokens=3,
+        )
+    )
+    latest_response = _post_load_transformer(
+        _valid_request(
+            modelFile=None,
+            prompt="  ba  ",
+            temperature=1.4,
+            topP=0.95,
+            maxTokens=4,
+        )
+    )
+
+    assert _parse_sse(named_response.text) == (
+        SSEEvent(
+            name="loaded",
+            payload={
+                "file": MODEL_FILENAME,
+                "prompt": "ab",
+            },
+        ),
+        SSEEvent(
+            name="result",
+            payload={"text": "ab named-result"},
+        ),
+        SSEEvent(
+            name="done",
+            payload={},
+        ),
+    )
+    assert _parse_sse(latest_response.text) == (
+        SSEEvent(
+            name="loaded",
+            payload={
+                "file": LATEST_MODEL_FILENAME,
+                "prompt": "ba",
+            },
+        ),
+        SSEEvent(
+            name="result",
+            payload={"text": "ba latest-result"},
+        ),
+        SSEEvent(
+            name="done",
+            payload={},
+        ),
+    )
+
+    dependencies.loader.assert_called_once_with(MODEL_FILENAME)
+    dependencies.latest_loader.assert_called_once_with()
+
+    named_prompt_call, latest_prompt_call = dependencies.prompt_preparation.call_args_list
+
+    assert named_prompt_call.args == (
+        "  ab  ",
+        named_snapshot.vocabulary,
+        named_snapshot.merges,
+    )
+    assert latest_prompt_call.args == (
+        "  ba  ",
+        latest_snapshot.vocabulary,
+        latest_snapshot.merges,
+    )
+    assert named_snapshot.parameters is not latest_snapshot.parameters
+    assert named_snapshot.vocabulary is not latest_snapshot.vocabulary
+    assert named_snapshot.merges is not latest_snapshot.merges
+    assert generation_calls[0][0] is named_snapshot.parameters
+    assert generation_calls[1][0] is latest_snapshot.parameters
+    assert generation_calls[0][1] is named_snapshot.vocabulary
+    assert generation_calls[1][1] is latest_snapshot.vocabulary
+    assert generation_calls[0][2] is not generation_calls[1][2]
+    assert generation_calls[0][6] is not generation_calls[1][6]
+    assert generation_calls[0][7] is not generation_calls[1][7]
     assert dependencies.slot.acquire_calls == 2
     assert dependencies.slot.release_calls == 2
     assert dependencies.slot.locked() is False
@@ -1646,3 +2126,561 @@ def test_load_transformer_real_model_integration_is_deterministic(
     ]
     assert original_read_bytes(model_path) == original_model_bytes
     worker_factory.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("model_file", "selected_filename"),
+    [
+        pytest.param(MODEL_FILENAME, MODEL_FILENAME, id="named"),
+        pytest.param(None, LATEST_MODEL_FILENAME, id="latest"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_load_transformer_generation_deadline_is_absolute_and_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    model_file: str | None,
+    selected_filename: str,
+) -> None:
+    dependencies = _install_lifecycle_dependencies(monkeypatch)
+    token_generator = ControlledTokenGenerator(dependencies.order)
+    dependencies.generator.side_effect = token_generator
+
+    disconnect_observer = AsyncMock(return_value=False)
+    monkeypatch.setattr(
+        train_transformer_route,
+        "request_is_disconnected",
+        disconnect_observer,
+    )
+
+    actual_loop = asyncio.get_running_loop()
+    clock = ControlledMonotonicClock([1_000.0, 1_299.9, 1_300.0])
+    monkeypatch.setattr(
+        train_transformer_route,
+        "asyncio",
+        ControlledAsyncioModule(actual_loop, clock),
+    )
+
+    assert dependencies.slot.acquire(blocking=False) is True
+    stream = train_transformer_route.stream_saved_transformer_generation(
+        request=cast(Any, object()),
+        model_filename=model_file,
+        prompt=RAW_PROMPT,
+        temperature=0.8,
+        top_p=0.9,
+        max_tokens=3,
+    )
+
+    async def collect_stream_body() -> str:
+        chunks: list[str] = []
+
+        async for chunk in stream:
+            chunks.append(chunk)
+
+        return "".join(chunks)
+
+    try:
+        response_body = await asyncio.wait_for(
+            collect_stream_body(),
+            timeout=TEST_ASYNC_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        pytest.fail("Saved Transformer generation did not enforce its deadline.")
+
+    expected_body = shared_format_sse(
+        "loaded",
+        {
+            "file": selected_filename,
+            "prompt": TRIMMED_PROMPT,
+        },
+    ) + shared_format_sse(
+        "error",
+        {"error": GENERATION_TIMEOUT_FAILURE},
+    )
+
+    assert response_body == expected_body
+
+    events = _parse_sse(response_body)
+
+    assert events == (
+        SSEEvent(
+            name="loaded",
+            payload={
+                "file": selected_filename,
+                "prompt": TRIMMED_PROMPT,
+            },
+        ),
+        SSEEvent(
+            name="error",
+            payload={"error": GENERATION_TIMEOUT_FAILURE},
+        ),
+    )
+
+    lowered_body = response_body.lower()
+
+    for private_marker in (
+        r"c:\private\deadline-model.json",
+        "timeouterror",
+        "traceback",
+        "task",
+        "future",
+        "thread",
+        "token_id",
+        "tokenids",
+        "model_array",
+        "sharedmemory",
+        "psm_",
+        "1000.0",
+        "1299.9",
+        "1300.0",
+    ):
+        assert private_marker.lower() not in lowered_body
+
+    assert token_generator.calculation_count == 1
+    assert token_generator.started.is_set()
+    assert token_generator.finished.is_set()
+    assert len(dependencies.cancellation_event_factory.events) == 1
+    assert dependencies.cancellation_event_factory.events[0].is_set()
+
+    observed_values = clock.observed_values
+    assert observed_values[0] == 1_000.0
+    assert observed_values[-1] - observed_values[0] == 300.0
+
+    first_run_order = dependencies.order.snapshot()
+    assert first_run_order.index("helper started") < first_run_order.index("stop observed")
+    assert first_run_order.index("stop observed") < first_run_order.index("helper finished")
+    assert first_run_order.index("helper finished") < first_run_order.index("slot released")
+    assert dependencies.slot.release_calls == 1
+    assert dependencies.slot.locked() is False
+
+    if model_file is None:
+        dependencies.latest_loader.assert_called_once_with()
+        dependencies.loader.assert_not_called()
+    else:
+        dependencies.loader.assert_called_once_with(MODEL_FILENAME)
+        dependencies.latest_loader.assert_not_called()
+
+    monkeypatch.setattr(train_transformer_route, "asyncio", asyncio)
+    dependencies.generator.side_effect = None
+    dependencies.generator.return_value = ControlledGeneratedText(GENERATED_TEXT)
+
+    recovery_response = await asyncio.to_thread(
+        _post_load_transformer,
+        _valid_request(modelFile=model_file),
+    )
+    _assert_controlled_success_response(
+        recovery_response,
+        selected_filename=selected_filename,
+    )
+    assert dependencies.slot.release_calls == 2
+
+
+@pytest.mark.parametrize(
+    ("model_file", "selected_filename"),
+    [
+        pytest.param(MODEL_FILENAME, MODEL_FILENAME, id="named"),
+        pytest.param(None, LATEST_MODEL_FILENAME, id="latest"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_load_transformer_disconnect_after_generation_completion_emits_no_late_success(
+    monkeypatch: pytest.MonkeyPatch,
+    model_file: str | None,
+    selected_filename: str,
+) -> None:
+    dependencies = _install_lifecycle_dependencies(monkeypatch)
+    generation_finished = threading.Event()
+
+    def complete_generation(
+        parameters: object,
+        vocabulary: object,
+        prepared_prompt: object,
+        **kwargs: object,
+    ) -> ControlledGeneratedText:
+        del parameters, vocabulary, prepared_prompt, kwargs
+        generation_finished.set()
+        return ControlledGeneratedText(GENERATED_TEXT)
+
+    dependencies.generator.side_effect = complete_generation
+
+    async def disconnect_after_generation_finished(
+        request: object,
+    ) -> bool:
+        del request
+        return generation_finished.is_set()
+
+    monkeypatch.setattr(
+        train_transformer_route,
+        "request_is_disconnected",
+        AsyncMock(side_effect=disconnect_after_generation_finished),
+    )
+
+    assert dependencies.slot.acquire(blocking=False) is True
+    stream = train_transformer_route.stream_saved_transformer_generation(
+        request=cast(Any, object()),
+        model_filename=model_file,
+        prompt=RAW_PROMPT,
+        temperature=0.8,
+        top_p=0.9,
+        max_tokens=3,
+    )
+
+    events = await asyncio.wait_for(
+        _collect_saved_transformer_stream(stream),
+        timeout=TEST_ASYNC_TIMEOUT_SECONDS,
+    )
+
+    assert events == (
+        SSEEvent(
+            name="loaded",
+            payload={
+                "file": selected_filename,
+                "prompt": TRIMMED_PROMPT,
+            },
+        ),
+    )
+    assert generation_finished.is_set()
+    dependencies.generator.assert_called_once()
+
+    if model_file is None:
+        dependencies.latest_loader.assert_called_once_with()
+        dependencies.loader.assert_not_called()
+    else:
+        dependencies.loader.assert_called_once_with(MODEL_FILENAME)
+        dependencies.latest_loader.assert_not_called()
+
+    assert len(dependencies.cancellation_event_factory.events) == 1
+    assert dependencies.cancellation_event_factory.events[0].is_set()
+    assert dependencies.slot.release_calls == 1
+    assert dependencies.slot.locked() is False
+
+
+@pytest.mark.parametrize(
+    ("model_file", "selected_filename"),
+    [
+        pytest.param(MODEL_FILENAME, MODEL_FILENAME, id="named"),
+        pytest.param(None, LATEST_MODEL_FILENAME, id="latest"),
+    ],
+)
+def test_load_transformer_disconnect_drains_generation_without_late_success(
+    monkeypatch: pytest.MonkeyPatch,
+    model_file: str | None,
+    selected_filename: str,
+) -> None:
+    dependencies = _install_lifecycle_dependencies(monkeypatch)
+    token_generator = ControlledTokenGenerator(dependencies.order)
+    dependencies.generator.side_effect = token_generator
+
+    async def disconnect_after_generation_starts(request: object) -> bool:
+        del request
+        return token_generator.started.is_set()
+
+    disconnect_observer = AsyncMock(side_effect=disconnect_after_generation_starts)
+    monkeypatch.setattr(
+        train_transformer_route,
+        "request_is_disconnected",
+        disconnect_observer,
+    )
+
+    response = _post_load_transformer(
+        _valid_request(modelFile=model_file),
+    )
+    _assert_sse_response_headers(response)
+    assert _parse_sse(response.text) == (
+        SSEEvent(
+            name="loaded",
+            payload={
+                "file": selected_filename,
+                "prompt": TRIMMED_PROMPT,
+            },
+        ),
+    )
+
+    assert token_generator.calculation_count == 1
+    assert token_generator.finished.is_set()
+    assert len(dependencies.cancellation_event_factory.events) == 1
+    assert dependencies.cancellation_event_factory.events[0].is_set()
+
+    first_run_order = dependencies.order.snapshot()
+    assert first_run_order.index("helper started") < first_run_order.index("stop observed")
+    assert first_run_order.index("stop observed") < first_run_order.index("helper finished")
+    assert first_run_order.index("helper finished") < first_run_order.index("slot released")
+    assert dependencies.slot.release_calls == 1
+    assert dependencies.slot.locked() is False
+
+    if model_file is None:
+        dependencies.latest_loader.assert_called_once_with()
+        dependencies.loader.assert_not_called()
+    else:
+        dependencies.loader.assert_called_once_with(MODEL_FILENAME)
+        dependencies.latest_loader.assert_not_called()
+
+    disconnect_observer.side_effect = None
+    disconnect_observer.return_value = False
+    dependencies.generator.side_effect = None
+    dependencies.generator.return_value = ControlledGeneratedText(GENERATED_TEXT)
+
+    recovery_response = _post_load_transformer(
+        _valid_request(modelFile=model_file),
+    )
+    _assert_controlled_success_response(
+        recovery_response,
+        selected_filename=selected_filename,
+    )
+    assert dependencies.slot.release_calls == 2
+
+
+@pytest.mark.parametrize(
+    ("model_file", "selected_filename"),
+    [
+        pytest.param(MODEL_FILENAME, MODEL_FILENAME, id="named"),
+        pytest.param(None, LATEST_MODEL_FILENAME, id="latest"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_load_transformer_task_cancellation_drains_generation_and_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    model_file: str | None,
+    selected_filename: str,
+) -> None:
+    dependencies = _install_lifecycle_dependencies(monkeypatch)
+    token_generator = ControlledTokenGenerator(dependencies.order)
+    dependencies.generator.side_effect = token_generator
+    monkeypatch.setattr(
+        train_transformer_route,
+        "request_is_disconnected",
+        AsyncMock(return_value=False),
+    )
+
+    assert dependencies.slot.acquire(blocking=False) is True
+    stream = train_transformer_route.stream_saved_transformer_generation(
+        request=cast(Any, object()),
+        model_filename=model_file,
+        prompt=RAW_PROMPT,
+        temperature=0.8,
+        top_p=0.9,
+        max_tokens=3,
+    )
+
+    loaded_chunk = await anext(stream)
+    assert _parse_sse(loaded_chunk) == (
+        SSEEvent(
+            name="loaded",
+            payload={
+                "file": selected_filename,
+                "prompt": TRIMMED_PROMPT,
+            },
+        ),
+    )
+
+    generation_task = asyncio.create_task(anext(stream))
+    assert await asyncio.to_thread(
+        token_generator.started.wait,
+        TEST_WAIT_SECONDS,
+    )
+
+    generation_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await generation_task
+
+    assert token_generator.calculation_count == 1
+    assert token_generator.finished.is_set()
+    assert len(dependencies.cancellation_event_factory.events) == 1
+    assert dependencies.cancellation_event_factory.events[0].is_set()
+
+    first_run_order = dependencies.order.snapshot()
+    assert first_run_order.index("helper started") < first_run_order.index("stop observed")
+    assert first_run_order.index("stop observed") < first_run_order.index("helper finished")
+    assert first_run_order.index("helper finished") < first_run_order.index("slot released")
+    assert dependencies.slot.release_calls == 1
+    assert dependencies.slot.locked() is False
+
+    if model_file is None:
+        dependencies.latest_loader.assert_called_once_with()
+        dependencies.loader.assert_not_called()
+    else:
+        dependencies.loader.assert_called_once_with(MODEL_FILENAME)
+        dependencies.latest_loader.assert_not_called()
+
+    dependencies.generator.side_effect = None
+    dependencies.generator.return_value = ControlledGeneratedText(GENERATED_TEXT)
+
+    recovery_response = await asyncio.to_thread(
+        _post_load_transformer,
+        _valid_request(modelFile=model_file),
+    )
+    _assert_controlled_success_response(
+        recovery_response,
+        selected_filename=selected_filename,
+    )
+    assert dependencies.slot.release_calls == 2
+
+
+def test_load_transformer_release_waits_for_interrupted_helper_to_finish_using_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependencies = _install_lifecycle_dependencies(monkeypatch)
+    snapshot = _make_loaded_snapshot(parameters=object())
+    dependencies.loader.return_value = snapshot
+
+    helper_started = threading.Event()
+    helper_observed_stop = threading.Event()
+    allow_helper_to_finish = threading.Event()
+    helper_finished = threading.Event()
+    state_in_use: list[object] = []
+    first_result: dict[str, Response] = {}
+
+    def blocked_generation(
+        parameters: object,
+        vocabulary: object,
+        prepared_prompt: object,
+        **kwargs: object,
+    ) -> ControlledGeneratedText:
+        del vocabulary, prepared_prompt
+
+        cancellation_event = cast(
+            threading.Event,
+            kwargs["cancellation_event"],
+        )
+        state_in_use.append(parameters)
+        dependencies.order.add("helper started")
+        helper_started.set()
+
+        if not cancellation_event.wait(TEST_WAIT_SECONDS):
+            raise AssertionError("The interrupted generation helper did not observe stopping.")
+
+        helper_observed_stop.set()
+
+        if not allow_helper_to_finish.wait(TEST_WAIT_SECONDS):
+            raise AssertionError("The interrupted generation helper was not released.")
+
+        state_in_use.clear()
+        dependencies.order.add("helper finished")
+        helper_finished.set()
+
+        return ControlledGeneratedText(GENERATED_TEXT)
+
+    dependencies.generator.side_effect = blocked_generation
+
+    async def disconnect_after_generation_starts(
+        request: object,
+    ) -> bool:
+        del request
+        return helper_started.is_set()
+
+    disconnect_observer = AsyncMock(side_effect=disconnect_after_generation_starts)
+    monkeypatch.setattr(
+        train_transformer_route,
+        "request_is_disconnected",
+        disconnect_observer,
+    )
+
+    def run_first_request() -> None:
+        first_result["response"] = _post_load_transformer(_valid_request())
+
+    first_thread = threading.Thread(
+        target=run_first_request,
+        daemon=True,
+    )
+    first_thread.start()
+
+    try:
+        assert helper_started.wait(TEST_WAIT_SECONDS)
+        assert helper_observed_stop.wait(TEST_WAIT_SECONDS)
+        assert state_in_use == [snapshot.parameters]
+        assert dependencies.slot.locked() is True
+        assert dependencies.slot.release_calls == 0
+
+        overlap_response = _post_load_transformer(_valid_request())
+
+        assert overlap_response.status_code == 429
+        assert overlap_response.json() == {
+            "detail": OVERLAP_FAILURE,
+        }
+        assert first_thread.is_alive()
+        assert helper_finished.is_set() is False
+        assert state_in_use == [snapshot.parameters]
+        assert dependencies.slot.release_calls == 0
+    finally:
+        allow_helper_to_finish.set()
+        first_thread.join(timeout=TEST_WAIT_SECONDS)
+
+    assert first_thread.is_alive() is False
+    assert helper_finished.is_set()
+    assert state_in_use == []
+
+    first_response = first_result["response"]
+    _assert_sse_response_headers(first_response)
+    assert _parse_sse(first_response.text) == (
+        SSEEvent(
+            name="loaded",
+            payload={
+                "file": MODEL_FILENAME,
+                "prompt": TRIMMED_PROMPT,
+            },
+        ),
+    )
+
+    first_run_order = dependencies.order.snapshot()
+    assert first_run_order.index("helper started") < first_run_order.index("stop observed")
+    assert first_run_order.index("stop observed") < first_run_order.index("helper finished")
+    assert first_run_order.index("helper finished") < first_run_order.index("slot released")
+    assert dependencies.slot.release_calls == 1
+    assert dependencies.slot.locked() is False
+
+    disconnect_observer.side_effect = None
+    disconnect_observer.return_value = False
+    dependencies.generator.side_effect = None
+    dependencies.generator.return_value = ControlledGeneratedText(GENERATED_TEXT)
+
+    recovery_response = _post_load_transformer(_valid_request())
+    _assert_controlled_success_response(recovery_response)
+    assert dependencies.slot.release_calls == 2
+
+
+def test_load_transformer_blocking_load_keeps_health_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dependencies = _install_lifecycle_dependencies(monkeypatch)
+    load_started = threading.Event()
+    allow_load_to_finish = threading.Event()
+
+    def blocking_loader(model_filename: str) -> object:
+        assert model_filename == MODEL_FILENAME
+        dependencies.order.add("helper started")
+        load_started.set()
+
+        if not allow_load_to_finish.wait(TEST_WAIT_SECONDS):
+            raise AssertionError("The controlled model load was not released.")
+
+        dependencies.order.add("helper finished")
+        return _make_loaded_snapshot()
+
+    dependencies.loader.side_effect = blocking_loader
+
+    with TestClient(app) as client:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            load_future = executor.submit(
+                client.post,
+                "/load-transformer",
+                content=json.dumps(_valid_request()),
+                headers={"Content-Type": "application/json"},
+            )
+
+            try:
+                assert load_started.wait(TEST_WAIT_SECONDS)
+                health_response = client.get("/health")
+            finally:
+                allow_load_to_finish.set()
+
+            load_response = load_future.result(timeout=TEST_WAIT_SECONDS)
+
+    assert health_response.status_code == 200
+    assert health_response.json() == {"status": "healthy"}
+    _assert_controlled_success_response(load_response)
+
+    order = dependencies.order.snapshot()
+    assert order.index("helper started") < order.index("helper finished")
+    assert order.index("helper finished") < order.index("slot released")
+    assert dependencies.slot.release_calls == 1
+    assert dependencies.slot.locked() is False

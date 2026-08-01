@@ -1,5 +1,4 @@
 # backend/src/how_llms_work/routes/train_transformer.py
-
 """FastAPI streaming and deterministic persistence for Transformer Training Runs."""
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ import tempfile
 from asyncio import sleep as presentation_sleep
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
+from enum import Enum, auto
 from functools import partial
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Event, Lock
@@ -32,6 +32,7 @@ from how_llms_work.ml.transformer import (
     TRANSFORMER_MIN_LAYER_COUNT,
     EmptySavedTransformerPromptError,
     InitializedTransformerParameters,
+    PreparedSavedTransformerPrompt,
     SavedTransformerConfig,
     SavedTransformerMerge,
     SavedTransformerModel,
@@ -71,6 +72,7 @@ _TRANSFORMER_MAX_EPOCH_COUNT: Final = 2_000
 PRESENTATION_DELAY_SECONDS: Final = 0.02
 _TRANSFORMER_HELPER_TIMEOUT_SECONDS: Final = 300.0
 _TRANSFORMER_HELPER_POLL_SECONDS: Final = 0.1
+_SAVED_TRANSFORMER_GENERATION_TIMEOUT_SECONDS: Final = 300.0
 
 _SAVED_TRANSFORMER_MODEL_LOAD_FAILURE: Final = "The saved Transformer model could not be loaded."
 _NO_VALID_SAVED_TRANSFORMER_MODEL_FAILURE: Final = "No valid saved Transformer model was found."
@@ -84,8 +86,12 @@ _SAVED_TRANSFORMER_PROMPT_TOO_LONG_FAILURE: Final = (
 _SAVED_TRANSFORMER_GENERATION_FAILURE: Final = (
     "The saved Transformer model could not generate text."
 )
+_SAVED_TRANSFORMER_GENERATION_TIMEOUT_FAILURE: Final = (
+    "Saved Transformer generation exceeded its time limit."
+)
 _SAVED_TRANSFORMER_START_FAILURE: Final = "Saved Transformer generation could not start."
 _TRANSFORMER_REQUEST_OVERLAP_DETAIL: Final = "Another Transformer request is already running."
+
 
 _TRANSFORMER_MODEL_FILENAME_PATTERN: Final = re.compile(
     r"transformer-weights-e([0-9]+)-l([0-9]+)-d32-h2-ff128-ctx32\.json"
@@ -1021,6 +1027,74 @@ class _TransformerClientDisconnected(RuntimeError):
     __slots__ = ()
 
 
+class _SavedTransformerGenerationDeadlineExceeded(RuntimeError):
+    """Private control-flow signal for an expired saved-generation deadline."""
+
+    __slots__ = ()
+
+
+class _SavedTransformerGenerationTerminalReason(Enum):
+    """One private mutually exclusive terminal reason for a saved-model run."""
+
+    NAMED_LOAD_FAILURE = auto()
+    LATEST_LOAD_FAILURE = auto()
+    EMPTY_PROMPT = auto()
+    UNSUPPORTED_PROMPT = auto()
+    PROMPT_TOO_LONG = auto()
+    GENERATION_FAILURE = auto()
+    DEADLINE = auto()
+    DISCONNECTED = auto()
+    CANCELLED = auto()
+    SUCCESS = auto()
+
+
+@dataclass(slots=True)
+class _SavedTransformerGenerationTerminalState:
+    """Record the first terminal reason observed by one saved-model run."""
+
+    reason: _SavedTransformerGenerationTerminalReason | None = None
+
+    def record(
+        self,
+        reason: _SavedTransformerGenerationTerminalReason,
+    ) -> bool:
+        """Record one terminal reason without replacing an earlier outcome."""
+        if self.reason is not None:
+            return False
+
+        self.reason = reason
+        return True
+
+    def is_open(self) -> bool:
+        """Return whether this run may still reach a terminal outcome."""
+        return self.reason is None
+
+    def error_message(self) -> str | None:
+        """Return the approved public error for the recorded terminal reason."""
+        if self.reason is _SavedTransformerGenerationTerminalReason.NAMED_LOAD_FAILURE:
+            return _SAVED_TRANSFORMER_MODEL_LOAD_FAILURE
+
+        if self.reason is _SavedTransformerGenerationTerminalReason.LATEST_LOAD_FAILURE:
+            return _NO_VALID_SAVED_TRANSFORMER_MODEL_FAILURE
+
+        if self.reason is _SavedTransformerGenerationTerminalReason.EMPTY_PROMPT:
+            return _EMPTY_SAVED_TRANSFORMER_PROMPT_FAILURE
+
+        if self.reason is _SavedTransformerGenerationTerminalReason.UNSUPPORTED_PROMPT:
+            return _UNSUPPORTED_SAVED_TRANSFORMER_PROMPT_FAILURE
+
+        if self.reason is _SavedTransformerGenerationTerminalReason.PROMPT_TOO_LONG:
+            return _SAVED_TRANSFORMER_PROMPT_TOO_LONG_FAILURE
+
+        if self.reason is _SavedTransformerGenerationTerminalReason.GENERATION_FAILURE:
+            return _SAVED_TRANSFORMER_GENERATION_FAILURE
+
+        if self.reason is _SavedTransformerGenerationTerminalReason.DEADLINE:
+            return _SAVED_TRANSFORMER_GENERATION_TIMEOUT_FAILURE
+
+        return None
+
+
 def _build_transformer_init_payload(
     *,
     preprocessing: TransformerPreprocessingSnapshot,
@@ -1055,6 +1129,26 @@ def _build_transformer_init_payload(
         "corpusSentences": len(preprocessing.corpus),
         "trainingSequences": len(preprocessing.training_sequences),
     }
+
+
+def _format_saved_transformer_terminal_error(
+    terminal_state: _SavedTransformerGenerationTerminalState,
+    *,
+    expected_reason: _SavedTransformerGenerationTerminalReason,
+) -> str | None:
+    """Format one safe error only when the expected reason won the run."""
+    if terminal_state.reason is not expected_reason:
+        return None
+
+    error_message = terminal_state.error_message()
+
+    if error_message is None:
+        return None
+
+    return format_sse(
+        "error",
+        {"error": error_message},
+    )
 
 
 async def request_is_disconnected(
@@ -1228,6 +1322,95 @@ async def _run_unbounded_transformer_helper(
         cancellation_event.set()
         await drain_helper_task()
         raise
+
+
+async def _run_saved_transformer_generation_helper(
+    operation: Callable[[], _HelperResultT],
+    *,
+    request: Request,
+    cancellation_event: Event,
+    terminal_state: _SavedTransformerGenerationTerminalState,
+) -> _HelperResultT:
+    """Run one saved-model generation helper under one absolute deadline."""
+    event_loop = asyncio.get_running_loop()
+    deadline = event_loop.time() + _SAVED_TRANSFORMER_GENERATION_TIMEOUT_SECONDS
+    helper_task = asyncio.create_task(asyncio.to_thread(operation))
+
+    async def drain_helper_task() -> None:
+        """Wait until generation no longer accesses request-owned state."""
+        try:
+            await asyncio.shield(helper_task)
+        except Exception:
+            logger.exception("Saved Transformer generation helper failed while being drained")
+
+    try:
+        while True:
+            if helper_task.done():
+                return helper_task.result()
+
+            remaining_seconds = deadline - event_loop.time()
+
+            if remaining_seconds <= 0.0:
+                raise _SavedTransformerGenerationDeadlineExceeded
+
+            completed_tasks, _pending_tasks = await asyncio.wait(
+                {helper_task},
+                timeout=min(
+                    _TRANSFORMER_HELPER_POLL_SECONDS,
+                    remaining_seconds,
+                ),
+            )
+
+            if helper_task in completed_tasks:
+                return helper_task.result()
+
+            if event_loop.time() >= deadline:
+                raise _SavedTransformerGenerationDeadlineExceeded
+
+            await _raise_if_transformer_client_disconnected(
+                request,
+                cancellation_event,
+            )
+    except _SavedTransformerGenerationDeadlineExceeded:
+        terminal_state.record(_SavedTransformerGenerationTerminalReason.DEADLINE)
+        cancellation_event.set()
+        await drain_helper_task()
+        raise
+    except _TransformerClientDisconnected:
+        terminal_state.record(_SavedTransformerGenerationTerminalReason.DISCONNECTED)
+        cancellation_event.set()
+        await drain_helper_task()
+        raise
+    except asyncio.CancelledError:
+        terminal_state.record(_SavedTransformerGenerationTerminalReason.CANCELLED)
+        cancellation_event.set()
+        await drain_helper_task()
+        raise
+
+
+async def _saved_transformer_success_boundary_is_open(
+    *,
+    request: Request,
+    cancellation_event: Event,
+    terminal_state: _SavedTransformerGenerationTerminalState,
+) -> bool:
+    """Observe stopping once more before a successful SSE emission."""
+    if not terminal_state.is_open():
+        return False
+
+    try:
+        await _raise_if_transformer_client_disconnected(
+            request,
+            cancellation_event,
+        )
+    except _TransformerClientDisconnected:
+        terminal_state.record(_SavedTransformerGenerationTerminalReason.DISCONNECTED)
+        raise
+    except asyncio.CancelledError:
+        terminal_state.record(_SavedTransformerGenerationTerminalReason.CANCELLED)
+        raise
+
+    return terminal_state.is_open()
 
 
 async def stream_transformer_training(
@@ -1491,18 +1674,26 @@ async def stream_saved_transformer_generation(
 ) -> AsyncIterator[str]:
     """Stream one Saved Transformer Generation Run."""
     cancellation_event = Event()
+    terminal_state = _SavedTransformerGenerationTerminalState()
+    loaded_snapshot: LoadedTransformerModelSnapshot | None = None
+    prepared_prompt: PreparedSavedTransformerPrompt | None = None
+    complete_text: str | None = None
+    error_event: str | None = None
+    result_event: str | None = None
+    done_event: str | None = None
 
     load_operation: Callable[[], LoadedTransformerModelSnapshot]
+    load_failure_reason: _SavedTransformerGenerationTerminalReason
 
     if model_filename is None:
         load_operation = load_latest_transformer_model
-        load_failure_message = _NO_VALID_SAVED_TRANSFORMER_MODEL_FAILURE
+        load_failure_reason = _SavedTransformerGenerationTerminalReason.LATEST_LOAD_FAILURE
     else:
         load_operation = partial(
             load_named_transformer_model,
             model_filename,
         )
-        load_failure_message = _SAVED_TRANSFORMER_MODEL_LOAD_FAILURE
+        load_failure_reason = _SavedTransformerGenerationTerminalReason.NAMED_LOAD_FAILURE
 
     try:
         try:
@@ -1512,10 +1703,15 @@ async def stream_saved_transformer_generation(
                 cancellation_event=cancellation_event,
             )
         except SavedTransformerModelLoadError:
-            yield format_sse(
-                "error",
-                {"error": load_failure_message},
+            terminal_state.record(load_failure_reason)
+            error_event = _format_saved_transformer_terminal_error(
+                terminal_state,
+                expected_reason=load_failure_reason,
             )
+
+            if error_event is not None:
+                yield error_event
+
             return
 
         try:
@@ -1530,22 +1726,40 @@ async def stream_saved_transformer_generation(
                 cancellation_event=cancellation_event,
             )
         except EmptySavedTransformerPromptError:
-            yield format_sse(
-                "error",
-                {"error": _EMPTY_SAVED_TRANSFORMER_PROMPT_FAILURE},
+            prompt_failure_reason = _SavedTransformerGenerationTerminalReason.EMPTY_PROMPT
+            terminal_state.record(prompt_failure_reason)
+            error_event = _format_saved_transformer_terminal_error(
+                terminal_state,
+                expected_reason=prompt_failure_reason,
             )
+
+            if error_event is not None:
+                yield error_event
+
             return
         except UnsupportedSavedTransformerPromptError:
-            yield format_sse(
-                "error",
-                {"error": _UNSUPPORTED_SAVED_TRANSFORMER_PROMPT_FAILURE},
+            prompt_failure_reason = _SavedTransformerGenerationTerminalReason.UNSUPPORTED_PROMPT
+            terminal_state.record(prompt_failure_reason)
+            error_event = _format_saved_transformer_terminal_error(
+                terminal_state,
+                expected_reason=prompt_failure_reason,
             )
+
+            if error_event is not None:
+                yield error_event
+
             return
         except SavedTransformerPromptTooLongError:
-            yield format_sse(
-                "error",
-                {"error": _SAVED_TRANSFORMER_PROMPT_TOO_LONG_FAILURE},
+            prompt_failure_reason = _SavedTransformerGenerationTerminalReason.PROMPT_TOO_LONG
+            terminal_state.record(prompt_failure_reason)
+            error_event = _format_saved_transformer_terminal_error(
+                terminal_state,
+                expected_reason=prompt_failure_reason,
             )
+
+            if error_event is not None:
+                yield error_event
+
             return
 
         yield format_sse(
@@ -1557,7 +1771,7 @@ async def stream_saved_transformer_generation(
         )
 
         try:
-            complete_text = await _run_unbounded_transformer_helper(
+            complete_text = await _run_saved_transformer_generation_helper(
                 partial(
                     generate_saved_transformer_text,
                     loaded_snapshot.parameters,
@@ -1570,46 +1784,117 @@ async def stream_saved_transformer_generation(
                 ),
                 request=request,
                 cancellation_event=cancellation_event,
+                terminal_state=terminal_state,
             )
+        except _SavedTransformerGenerationDeadlineExceeded:
+            terminal_state.record(_SavedTransformerGenerationTerminalReason.DEADLINE)
+            error_event = _format_saved_transformer_terminal_error(
+                terminal_state,
+                expected_reason=(_SavedTransformerGenerationTerminalReason.DEADLINE),
+            )
+
+            if error_event is not None:
+                yield error_event
+
+            return
         except _TransformerClientDisconnected:
             raise
         except Exception:
             cancellation_event.set()
-            logger.exception("Saved Transformer text generation failed")
 
-            yield format_sse(
-                "error",
-                {"error": _SAVED_TRANSFORMER_GENERATION_FAILURE},
-            )
+            if terminal_state.record(_SavedTransformerGenerationTerminalReason.GENERATION_FAILURE):
+                logger.exception("Saved Transformer text generation failed")
+                error_event = _format_saved_transformer_terminal_error(
+                    terminal_state,
+                    expected_reason=(_SavedTransformerGenerationTerminalReason.GENERATION_FAILURE),
+                )
+
+                if error_event is not None:
+                    yield error_event
+
             return
 
-        yield format_sse(
+        result_event = format_sse(
             "result",
             {"text": complete_text},
         )
-        yield format_sse(
+        done_event = format_sse(
             "done",
             {},
         )
+
+        if not await _saved_transformer_success_boundary_is_open(
+            request=request,
+            cancellation_event=cancellation_event,
+            terminal_state=terminal_state,
+        ):
+            return
+
+        yield result_event
+
+        if not await _saved_transformer_success_boundary_is_open(
+            request=request,
+            cancellation_event=cancellation_event,
+            terminal_state=terminal_state,
+        ):
+            return
+
+        if not terminal_state.record(_SavedTransformerGenerationTerminalReason.SUCCESS):
+            return
+
+        yield done_event
         return
     except _TransformerClientDisconnected:
+        terminal_state.record(_SavedTransformerGenerationTerminalReason.DISCONNECTED)
         cancellation_event.set()
         return
     except asyncio.CancelledError:
+        terminal_state.record(_SavedTransformerGenerationTerminalReason.CANCELLED)
         cancellation_event.set()
         raise
     except Exception:
         cancellation_event.set()
-        logger.exception("Saved Transformer Generation Run stream failed")
 
-        yield format_sse(
-            "error",
-            {"error": _SAVED_TRANSFORMER_GENERATION_FAILURE},
-        )
+        if terminal_state.record(_SavedTransformerGenerationTerminalReason.GENERATION_FAILURE):
+            logger.exception("Saved Transformer Generation Run stream failed")
+            error_event = _format_saved_transformer_terminal_error(
+                terminal_state,
+                expected_reason=(_SavedTransformerGenerationTerminalReason.GENERATION_FAILURE),
+            )
+
+            if error_event is not None:
+                yield error_event
+        else:
+            logger.exception("Saved Transformer Generation Run failed after its terminal outcome")
+
         return
     finally:
-        cancellation_event.set()
-        _TRANSFORMER_RUN_SLOT.release()
+        try:
+            cancellation_event.set()
+        except Exception:
+            try:
+                logger.exception("Saved Transformer Generation Run cancellation cleanup failed")
+            except Exception:
+                pass
+        finally:
+            complete_text = None
+            result_event = None
+            done_event = None
+            error_event = None
+            prepared_prompt = None
+            loaded_snapshot = None
+
+            del load_operation
+            del terminal_state
+            del cancellation_event
+            del request
+            del model_filename
+            del prompt
+            del temperature
+            del top_p
+            del max_tokens
+
+            _TRANSFORMER_RUN_SLOT.release()
 
 
 @router.post("/train-transformer")
@@ -1617,7 +1902,7 @@ async def train_transformer(
     payload: TrainTransformerRequest,
     request: Request,
 ) -> StreamingResponse:
-    """Validate, reserve, prepare, and start one Transformer Event Stream."""
+    """Validate, reserve the shared process-local slot, prepare, and start one Transformer Event Stream."""
     if not _TRANSFORMER_RUN_SLOT.acquire(blocking=False):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -1674,31 +1959,40 @@ async def load_transformer(
     payload: LoadTransformerRequest,
     request: Request,
 ) -> StreamingResponse:
-    """Validate, reserve, and start one Saved Transformer Event Stream."""
+    """Validate, reserve the shared process-local slot, and start one Saved Transformer Event Stream."""
     if not _TRANSFORMER_RUN_SLOT.acquire(blocking=False):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=_TRANSFORMER_REQUEST_OVERLAP_DETAIL,
         )
 
+    route_owns_slot = True
+    event_stream: AsyncIterator[str] | None = None
+
     try:
-        response = create_sse_response(
-            stream_saved_transformer_generation(
-                request=request,
-                model_filename=payload.model_file,
-                prompt=payload.prompt,
-                temperature=payload.temperature,
-                top_p=payload.top_p,
-                max_tokens=payload.max_tokens,
-            )
+        event_stream = stream_saved_transformer_generation(
+            request=request,
+            model_filename=payload.model_file,
+            prompt=payload.prompt,
+            temperature=payload.temperature,
+            top_p=payload.top_p,
+            max_tokens=payload.max_tokens,
         )
+        response = create_sse_response(event_stream)
+        route_owns_slot = False
     except Exception:
         logger.exception("Saved Transformer Generation Run preparation failed")
-        _TRANSFORMER_RUN_SLOT.release()
-
-        raise HTTPException(
+        start_failure = HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=_SAVED_TRANSFORMER_START_FAILURE,
-        ) from None
+        )
+
+        event_stream = None
+
+        if route_owns_slot:
+            route_owns_slot = False
+            _TRANSFORMER_RUN_SLOT.release()
+
+        raise start_failure from None
 
     return response
