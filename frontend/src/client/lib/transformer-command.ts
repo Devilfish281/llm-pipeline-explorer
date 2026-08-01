@@ -1,3 +1,4 @@
+import type { Message } from "../../shared/types/message.js";
 export const TRAIN_TRANSFORMER_ENDPOINT = "/api/train-transformer" as const;
 export const LOAD_TRANSFORMER_ENDPOINT = "/api/load-transformer" as const;
 
@@ -94,6 +95,14 @@ export function buildTransformerTrainingRequestBody(
     numLayers: Number.parseInt(values[3] ?? "", 10) || 2,
     maxTokens: Number.parseInt(values[4] ?? "", 10) || 40,
   };
+}
+
+export function replaceTransformerMessages(
+  _previous: Message[],
+  userMessage: Message,
+  assistantMessage: Message,
+): Message[] {
+  return [userMessage, assistantMessage];
 }
 
 function createValidationSubmission(
